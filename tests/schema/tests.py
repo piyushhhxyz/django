@@ -4634,6 +4634,82 @@ class SchemaTests(TransactionTestCase):
         self.assertIsNone(self.get_column_collation(Thing._meta.db_table, "when"))
 
     @skipUnlessDBFeature(
+        "supports_collation_on_charfield",
+        "supports_foreign_keys",
+    )
+    @isolate_apps("schema")
+    def test_db_collation_charfield_fk_propagation(self):
+        collation = connection.features.test_collations.get("non_default")
+        if not collation:
+            self.skipTest("Language collations are not supported.")
+
+        class FKTarget(Model):
+            name = CharField(max_length=255, unique=True, db_collation=collation)
+
+            class Meta:
+                app_label = "schema"
+
+        class FKSource(Model):
+            fk = ForeignKey(FKTarget, CASCADE, to_field="name")
+
+            class Meta:
+                app_label = "schema"
+
+        with connection.schema_editor() as editor:
+            editor.create_model(FKTarget)
+            editor.create_model(FKSource)
+        self.assertEqual(
+            self.get_column_collation(FKTarget._meta.db_table, "name"),
+            collation,
+        )
+        self.assertEqual(
+            self.get_column_collation(FKSource._meta.db_table, "fk_id"),
+            collation,
+        )
+        with connection.schema_editor() as editor:
+            editor.delete_model(FKSource)
+            editor.delete_model(FKTarget)
+
+    @skipUnlessDBFeature(
+        "supports_collation_on_charfield",
+        "supports_foreign_keys",
+    )
+    @isolate_apps("schema")
+    def test_db_collation_charfield_pk_fk_propagation(self):
+        collation = connection.features.test_collations.get("non_default")
+        if not collation:
+            self.skipTest("Language collations are not supported.")
+
+        class FKTarget(Model):
+            id = CharField(
+                max_length=255, primary_key=True, db_collation=collation
+            )
+
+            class Meta:
+                app_label = "schema"
+
+        class FKSource(Model):
+            fk = ForeignKey(FKTarget, CASCADE)
+
+            class Meta:
+                app_label = "schema"
+
+        with connection.schema_editor() as editor:
+            editor.create_model(FKTarget)
+            editor.create_model(FKSource)
+        self.assertEqual(
+            self.get_column_collation(FKTarget._meta.db_table, "id"),
+            collation,
+        )
+        self.assertEqual(
+            self.get_column_collation(FKSource._meta.db_table, "fk_id"),
+            collation,
+        )
+        with connection.schema_editor() as editor:
+            editor.delete_model(FKSource)
+            editor.delete_model(FKTarget)
+
+    @skipUnlessDBFeature(
         "supports_collation_on_charfield", "supports_collation_on_textfield"
     )
     def test_alter_field_type_and_db_collation(self):

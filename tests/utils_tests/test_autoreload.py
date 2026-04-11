@@ -160,10 +160,22 @@ class TestChildArguments(SimpleTestCase):
     @mock.patch('sys.argv', [django.__main__.__file__, 'runserver'])
     @mock.patch('sys.warnoptions', [])
     def test_run_as_module(self):
-        self.assertEqual(
-            autoreload.get_child_arguments(),
-            [sys.executable, '-m', 'django', 'runserver']
-        )
+        with mock.patch.dict(sys.modules, {'__main__': django.__main__}):
+            self.assertEqual(
+                autoreload.get_child_arguments(),
+                [sys.executable, '-m', 'django', 'runserver']
+            )
+
+    @mock.patch('sys.argv', ['/path/to/custom_pkg/__main__.py', 'runserver'])
+    @mock.patch('sys.warnoptions', [])
+    def test_run_as_non_django_module(self):
+        mock_main = types.ModuleType('__main__')
+        mock_main.__spec__ = types.SimpleNamespace(parent='custom_pkg')
+        with mock.patch.dict(sys.modules, {'__main__': mock_main}):
+            self.assertEqual(
+                autoreload.get_child_arguments(),
+                [sys.executable, '-m', 'custom_pkg', 'runserver']
+            )
 
     @mock.patch('sys.argv', [__file__, 'runserver'])
     @mock.patch('sys.warnoptions', ['error'])
@@ -443,10 +455,11 @@ class RestartWithReloaderTests(SimpleTestCase):
             )
 
     def test_python_m_django(self):
-        main = '/usr/lib/pythonX.Y/site-packages/django/__main__.py'
-        argv = [main, 'runserver']
+        argv = ['__main__.py', 'runserver']
         mock_call = self.patch_autoreload(argv)
-        with mock.patch('django.__main__.__file__', main):
+        mock_main = types.ModuleType('__main__')
+        mock_main.__spec__ = types.SimpleNamespace(parent='django')
+        with mock.patch.dict(sys.modules, {'__main__': mock_main}):
             autoreload.restart_with_reloader()
             self.assertEqual(mock_call.call_count, 1)
             self.assertEqual(mock_call.call_args[0][0], [self.executable, '-Wall', '-m', 'django'] + argv[1:])

@@ -3,6 +3,7 @@ import unittest
 
 from django.conf import settings
 from django.contrib.admindocs import utils, views
+from django.contrib.admindocs.utils import replace_named_groups, replace_unnamed_groups
 from django.contrib.admindocs.views import get_return_data_type, simplify_regex
 from django.contrib.sites.models import Site
 from django.db import models
@@ -354,7 +355,44 @@ class AdminDocViewFunctionsTests(SimpleTestCase):
             (r'^(?P<a>(x|y))/b/(?P<c>\w+)ab', '/<a>/b/<c>ab'),
             (r'^(?P<a>(x|y)(\(|\)))/b/(?P<c>\w+)ab', '/<a>/b/<c>ab'),
             (r'^a/?$', '/a/'),
+            # Trailing named group without trailing $/
+            (r'^(?P<a>\w+)/b/(?P<c>\w+)', '/<a>/b/<c>'),
+            # Trailing unnamed group without trailing $/
+            (r'^(?P<a>\w+)/b/(\w+)', '/<a>/b/<var>'),
+            # Issue from bug report: trailing named group in DRF-style URL
+            (r'entries/(?P<pk>[^/.]+)/relationships/(?P<related_field>\w+)', '/entries/<pk>/relationships/<related_field>'),
         )
         for pattern, output in tests:
             with self.subTest(pattern=pattern):
                 self.assertEqual(simplify_regex(pattern), output)
+
+    def test_replace_named_groups(self):
+        tests = (
+            # Trailing named group with /
+            (r'^(?P<a>\w+)/b/(?P<c>\w+)/$', r'^<a>/b/<c>/$'),
+            # Trailing named group with $
+            (r'^(?P<a>\w+)/b/(?P<c>\w+)$', r'^<a>/b/<c>$'),
+            # Trailing named group without $ or /
+            (r'^(?P<a>\w+)/b/(?P<c>\w+)', r'^<a>/b/<c>'),
+            # Nested named group at end of pattern
+            (r'^(?P<a>(x|y))/b/(?P<c>\w+)', r'^<a>/b/<c>'),
+            # Issue from bug report
+            (r'entries/(?P<pk>[^/.]+)/relationships/(?P<related_field>\w+)',
+             r'entries/<pk>/relationships/<related_field>'),
+        )
+        for pattern, expected in tests:
+            with self.subTest(pattern=pattern):
+                self.assertEqual(replace_named_groups(pattern), expected)
+
+    def test_replace_unnamed_groups(self):
+        tests = (
+            # Trailing unnamed group with $
+            (r'^<a>/b/(\w+)$', r'^<a>/b/<var>$'),
+            # Trailing unnamed group without $ or /
+            (r'^b/(\w+)', r'^b/<var>'),
+            # Nested trailing unnamed group without $ or /
+            (r'^b/((x|y)\w+)', r'^b/<var>'),
+        )
+        for pattern, expected in tests:
+            with self.subTest(pattern=pattern):
+                self.assertEqual(replace_unnamed_groups(pattern), expected)

@@ -328,6 +328,10 @@ class Query(BaseExpression):
             obj.subq_aliases = self.subq_aliases.copy()
         obj.used_aliases = self.used_aliases.copy()
         obj._filtered_relations = self._filtered_relations.copy()
+        # Deep-copy combined queries to prevent mutations to the inner queries
+        # from leaking between clones (e.g. ordering/values changes on a
+        # derived queryset should not affect the original).
+        obj.combined_queries = tuple([q.clone() for q in self.combined_queries])
         # Clear the cached_property
         try:
             del obj.base_table

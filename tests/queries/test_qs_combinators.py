@@ -228,3 +228,17 @@ class QuerySetSetOperationTests(TestCase):
         qs1 = Number.objects.all()
         qs2 = Number.objects.intersection(Number.objects.filter(num__gt=1))
         self.assertEqual(qs1.difference(qs2).count(), 2)
+
+    def test_union_clone_deep_copies_combined_queries(self):
+        """
+        Cloning a combined queryset (union) should deep-copy the
+        combined_queries so that mutations on the derived queryset's
+        inner queries don't leak to the original.
+        """
+        qs1 = Number.objects.filter(num__lte=1)
+        qs2 = Number.objects.filter(num__gte=8)
+        qs = qs1.union(qs2)
+        cloned_qs = qs.all()
+        # The combined queries should be independent copies, not shared
+        # references.
+        self.assertIsNot(qs.query.combined_queries[0], cloned_qs.query.combined_queries[0])

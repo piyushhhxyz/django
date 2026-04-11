@@ -191,15 +191,20 @@ class HasKeyLookup(PostgresOperatorLookup):
         for key in rhs:
             if isinstance(key, KeyTransform):
                 *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
-            else:
-                rhs_key_transforms = [key]
-            rhs_params.append(
-                "%s%s"
-                % (
-                    lhs_json_path,
-                    compile_json_path(rhs_key_transforms, include_root=False),
+                rhs_params.append(
+                    "%s%s"
+                    % (
+                        lhs_json_path,
+                        compile_json_path(rhs_key_transforms, include_root=False),
+                    )
                 )
-            )
+            else:
+                # Plain string key: always use dot-notation to treat as an
+                # object property name. compile_json_path() would incorrectly
+                # interpret numeric strings like '1111' as array indices.
+                rhs_params.append(
+                    "%s.%s" % (lhs_json_path, json.dumps(str(key)))
+                )
         # Add condition for each key.
         if self.logical_operator:
             sql = "(%s)" % self.logical_operator.join([sql] * len(rhs_params))
@@ -387,25 +392,28 @@ class KeyTransformTextLookupMixin:
 class KeyTransformIsNull(lookups.IsNull):
     # key__isnull=False is the same as has_key='key'
     def as_oracle(self, compiler, connection):
-        sql, params = HasKey(
-            self.lhs.lhs,
-            self.lhs.key_name,
-        ).as_oracle(compiler, connection)
+        lhs, lhs_params, lhs_key_transforms = self.lhs.preprocess_lhs(
+            compiler, connection
+        )
+        json_path = compile_json_path(lhs_key_transforms)
+        sql = "JSON_EXISTS(%s, '%%s')" % lhs
+        # Inline json_path directly into SQL because path expressions
+        # cannot be passed as bind variables on Oracle.
+        sql = sql % json_path
         if not self.rhs:
-            return sql, params
+            return sql, tuple(lhs_params)
         # Column doesn't have a key or IS NULL.
-        lhs, lhs_params, _ = self.lhs.preprocess_lhs(compiler, connection)
-        return "(NOT %s OR %s IS NULL)" % (sql, lhs), tuple(params) + tuple(lhs_params)
+        return "(NOT %s OR %s IS NULL)" % (sql, lhs), tuple(lhs_params) * 2
 
     def as_sqlite(self, compiler, connection):
         template = "JSON_TYPE(%s, %%s) IS NULL"
         if not self.rhs:
             template = "JSON_TYPE(%s, %%s) IS NOT NULL"
-        return HasKey(self.lhs.lhs, self.lhs.key_name).as_sql(
-            compiler,
-            connection,
-            template=template,
+        lhs, lhs_params, lhs_key_transforms = self.lhs.preprocess_lhs(
+            compiler, connection
         )
+        json_path = compile_json_path(lhs_key_transforms)
+        return template % lhs, tuple(lhs_params) + (json_path,)
 
 
 class KeyTransformIn(lookups.In):

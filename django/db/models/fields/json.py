@@ -191,14 +191,11 @@ class HasKeyLookup(PostgresOperatorLookup):
         for key in rhs:
             if isinstance(key, KeyTransform):
                 *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
+                rhs_json_path = compile_json_path(rhs_key_transforms, include_root=False)
             else:
-                rhs_key_transforms = [key]
+                rhs_json_path = ".%s" % json.dumps(str(key))
             rhs_params.append(
-                "%s%s"
-                % (
-                    lhs_json_path,
-                    compile_json_path(rhs_key_transforms, include_root=False),
-                )
+                "%s%s" % (lhs_json_path, rhs_json_path)
             )
         # Add condition for each key.
         if self.logical_operator:
@@ -386,10 +383,21 @@ class KeyTransformTextLookupMixin:
 
 class KeyTransformIsNull(lookups.IsNull):
     # key__isnull=False is the same as has_key='key'
+    def _get_key_transform(self):
+        """
+        Return a KeyTransform with only the final key_name and a
+        non-KeyTransform base so that preprocess_lhs() returns only
+        [key_name] without duplicating intermediate path segments.
+        """
+        previous = self.lhs
+        while isinstance(previous, KeyTransform):
+            previous = previous.lhs
+        return KeyTransform(self.lhs.key_name, previous)
+
     def as_oracle(self, compiler, connection):
         sql, params = HasKey(
             self.lhs.lhs,
-            self.lhs.key_name,
+            self._get_key_transform(),
         ).as_oracle(compiler, connection)
         if not self.rhs:
             return sql, params
@@ -401,7 +409,7 @@ class KeyTransformIsNull(lookups.IsNull):
         template = "JSON_TYPE(%s, %%s) IS NULL"
         if not self.rhs:
             template = "JSON_TYPE(%s, %%s) IS NOT NULL"
-        return HasKey(self.lhs.lhs, self.lhs.key_name).as_sql(
+        return HasKey(self.lhs.lhs, self._get_key_transform()).as_sql(
             compiler,
             connection,
             template=template,
@@ -466,7 +474,13 @@ class KeyTransformExact(JSONExact):
         rhs, rhs_params = super().process_rhs(compiler, connection)
         if rhs_params == ["null"]:
             # Field has key and it's NULL.
-            has_key_expr = HasKey(self.lhs.lhs, self.lhs.key_name)
+            previous = self.lhs
+            while isinstance(previous, KeyTransform):
+                previous = previous.lhs
+            has_key_expr = HasKey(
+                self.lhs.lhs,
+                KeyTransform(self.lhs.key_name, previous),
+            )
             has_key_sql, has_key_params = has_key_expr.as_oracle(compiler, connection)
             is_null_expr = self.lhs.get_lookup("isnull")(self.lhs, True)
             is_null_sql, is_null_params = is_null_expr.as_sql(compiler, connection)

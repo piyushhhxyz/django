@@ -387,14 +387,15 @@ class BaseForm:
         self._post_clean()
 
     def _clean_fields(self):
-        for name, field in self.fields.items():
+        for name, bf in self._bound_items():
+            field = bf.field
             if field.disabled:
-                value = self.get_initial_for_field(field, name)
+                value = bf.initial
             else:
-                value = self._field_data_value(field, self.add_prefix(name))
+                value = bf.data
             try:
                 if isinstance(field, FileField):
-                    initial = self.get_initial_for_field(field, name)
+                    initial = bf.initial
                     value = field.clean(value, initial)
                 else:
                     value = field.clean(value)
@@ -434,29 +435,13 @@ class BaseForm:
         """Return True if data differs from initial."""
         return bool(self.changed_data)
 
+    def _bound_items(self):
+        """Return a list of (name, BoundField) pairs for all fields."""
+        return [(name, self[name]) for name in self.fields]
+
     @cached_property
     def changed_data(self):
-        data = []
-        for name, field in self.fields.items():
-            data_value = self._field_data_value(field, self.add_prefix(name))
-            if not field.show_hidden_initial:
-                # Use the BoundField's initial as this is the value passed to
-                # the widget.
-                initial_value = self[name].initial
-            else:
-                initial_prefixed_name = self.add_initial_prefix(name)
-                hidden_widget = field.hidden_widget()
-                try:
-                    initial_value = field.to_python(
-                        self._widget_data_value(hidden_widget, initial_prefixed_name)
-                    )
-                except ValidationError:
-                    # Always assume data has changed if validation fails.
-                    data.append(name)
-                    continue
-            if field.has_changed(initial_value, data_value):
-                data.append(name)
-        return data
+        return [name for name, bf in self._bound_items() if bf._did_change()]
 
     @property
     def media(self):

@@ -1,6 +1,7 @@
 import datetime
 import re
 
+from django.core.exceptions import ValidationError
 from django.forms.utils import flatatt, pretty_name
 from django.forms.widgets import Textarea, TextInput
 from django.utils.functional import cached_property
@@ -218,6 +219,23 @@ class BoundField:
                 not self.field.widget.supports_microseconds):
             data = data.replace(microsecond=0)
         return data
+
+    def _did_change(self):
+        data = self.data
+        if not self.field.show_hidden_initial:
+            initial = self.initial
+        else:
+            initial_prefixed_name = self.form.add_initial_prefix(self.name)
+            hidden_widget = self.field.hidden_widget()
+            try:
+                initial = self.field.to_python(
+                    self.form._widget_data_value(
+                        hidden_widget, initial_prefixed_name,
+                    )
+                )
+            except ValidationError:
+                return True
+        return self.field.has_changed(initial, data)
 
     def build_widget_attrs(self, attrs, widget=None):
         widget = widget or self.field.widget

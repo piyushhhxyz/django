@@ -1,6 +1,7 @@
 import datetime
 import sys
 import unittest
+from unittest import mock
 
 from django.contrib.admin import (
     AllValuesFieldListFilter, BooleanFieldListFilter, ModelAdmin,
@@ -590,6 +591,63 @@ class ListFiltersTests(TestCase):
         filterspec = changelist.get_filters(request)[0][0]
         expected = [(self.john.pk, 'John Blue'), (self.jack.pk, 'Jack Red')]
         self.assertEqual(filterspec.lookup_choices, expected)
+
+    def test_relatedfieldlistfilter_foreignkey_default_ordering(self):
+        """RelatedFieldListFilter falls back to Meta.ordering."""
+        class BookAdmin(ModelAdmin):
+            list_filter = ('employee',)
+
+        with mock.patch.object(Employee._meta, 'ordering', new=('name',)):
+            modeladmin = BookAdmin(Book, site)
+            request = self.request_factory.get('/')
+            request.user = self.alfred
+            changelist = modeladmin.get_changelist_instance(request)
+            filterspec = changelist.get_filters(request)[0][0]
+            expected = [(self.jack.pk, 'Jack Red'), (self.john.pk, 'John Blue')]
+            self.assertEqual(filterspec.lookup_choices, expected)
+
+    def test_relatedonlyfieldlistfilter_foreignkey_ordering(self):
+        """RelatedOnlyFieldListFilter respects ModelAdmin.ordering."""
+        self.djangonaut_book.employee = self.john
+        self.djangonaut_book.save()
+        self.bio_book.employee = self.jack
+        self.bio_book.save()
+
+        class EmployeeAdminWithOrdering(ModelAdmin):
+            ordering = ('name',)
+
+        class BookAdmin(ModelAdmin):
+            list_filter = (('employee', RelatedOnlyFieldListFilter),)
+
+        site.register(Employee, EmployeeAdminWithOrdering)
+        self.addCleanup(lambda: site.unregister(Employee))
+        modeladmin = BookAdmin(Book, site)
+
+        request = self.request_factory.get('/')
+        request.user = self.alfred
+        changelist = modeladmin.get_changelist_instance(request)
+        filterspec = changelist.get_filters(request)[0][0]
+        expected = [(self.jack.pk, 'Jack Red'), (self.john.pk, 'John Blue')]
+        self.assertEqual(filterspec.lookup_choices, expected)
+
+    def test_relatedonlyfieldlistfilter_foreignkey_default_ordering(self):
+        """RelatedOnlyFieldListFilter falls back to Meta.ordering."""
+        self.djangonaut_book.employee = self.john
+        self.djangonaut_book.save()
+        self.bio_book.employee = self.jack
+        self.bio_book.save()
+
+        class BookAdmin(ModelAdmin):
+            list_filter = (('employee', RelatedOnlyFieldListFilter),)
+
+        with mock.patch.object(Employee._meta, 'ordering', new=('name',)):
+            modeladmin = BookAdmin(Book, site)
+            request = self.request_factory.get('/')
+            request.user = self.alfred
+            changelist = modeladmin.get_changelist_instance(request)
+            filterspec = changelist.get_filters(request)[0][0]
+            expected = [(self.jack.pk, 'Jack Red'), (self.john.pk, 'John Blue')]
+            self.assertEqual(filterspec.lookup_choices, expected)
 
     def test_relatedfieldlistfilter_manytomany(self):
         modeladmin = BookAdmin(Book, site)

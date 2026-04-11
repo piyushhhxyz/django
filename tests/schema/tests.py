@@ -4662,6 +4662,50 @@ class SchemaTests(TransactionTestCase):
         self.assertEqual(columns["info"][0], "TextField")
         self.assertIsNone(columns["info"][1][8])
 
+    @isolate_apps("schema")
+    @skipUnlessDBFeature("supports_collation_on_charfield")
+    def test_db_collation_charfield_fk_propagation(self):
+        collation = connection.features.test_collations.get("non_default")
+        if not collation:
+            self.skipTest("Language collations are not supported.")
+
+        class Foo(Model):
+            id = CharField(max_length=255, primary_key=True, db_collation=collation)
+
+            class Meta:
+                app_label = "schema"
+
+        class Bar(Model):
+            foo = ForeignKey(Foo, CASCADE)
+
+            class Meta:
+                app_label = "schema"
+
+        class Baz(Model):
+            foo = OneToOneField(Foo, CASCADE)
+
+            class Meta:
+                app_label = "schema"
+
+        self.isolated_local_models = [Foo, Bar, Baz]
+        with connection.schema_editor() as editor:
+            editor.create_model(Foo)
+            editor.create_model(Bar)
+            editor.create_model(Baz)
+
+        self.assertEqual(
+            self.get_column_collation(Foo._meta.db_table, "id"),
+            collation,
+        )
+        self.assertEqual(
+            self.get_column_collation(Bar._meta.db_table, "foo_id"),
+            collation,
+        )
+        self.assertEqual(
+            self.get_column_collation(Baz._meta.db_table, "foo_id"),
+            collation,
+        )
+
     @skipUnlessDBFeature(
         "supports_collation_on_charfield",
         "supports_non_deterministic_collations",

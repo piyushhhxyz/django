@@ -29,6 +29,7 @@ class JSONFieldTest(SimpleTestCase):
         self.assertEqual(field.prepare_value({'a': 'b'}), '{"a": "b"}')
         self.assertEqual(field.prepare_value(None), 'null')
         self.assertEqual(field.prepare_value('foo'), '"foo"')
+        self.assertEqual(field.prepare_value({'a': '中国'}), '{"a": "中国"}')
 
     def test_widget(self):
         field = JSONField()
@@ -67,6 +68,8 @@ class JSONFieldTest(SimpleTestCase):
         field = JSONField()
         self.assertIs(field.has_changed({'a': True}, '{"a": 1}'), True)
         self.assertIs(field.has_changed({'a': 1, 'b': 2}, '{"b": 2, "a": 1}'), False)
+        self.assertIs(field.has_changed({'a': '中国'}, '{"a": "中国"}'), False)
+        self.assertIs(field.has_changed({'a': '中国'}, '{"a": "日本"}'), True)
 
     def test_custom_encoder_decoder(self):
         class CustomDecoder(json.JSONDecoder):

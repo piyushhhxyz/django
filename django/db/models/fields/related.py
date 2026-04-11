@@ -1180,12 +1180,10 @@ class ForeignKey(ForeignObject):
         return self.target_field.rel_db_type(connection=connection)
 
     def db_parameters(self, connection):
-        target_db_parameters = self.target_field.db_parameters(connection)
-        return {
-            "type": self.db_type(connection),
-            "check": self.db_check(connection),
-            "collation": target_db_parameters.get("collation"),
-        }
+        db_params = {"type": self.db_type(connection), "check": self.db_check(connection)}
+        if self.target_field:
+            db_params["collation"] = getattr(self.target_field, "db_collation", None)
+        return db_params
 
     def convert_empty_strings(self, value, expression, connection):
         if (not value) and isinstance(value, str):

@@ -9,8 +9,9 @@ import random
 import tempfile
 from pathlib import Path
 
-from django.core.files.storage import FileSystemStorage
+from django.core.files.storage import FileSystemStorage, default_storage
 from django.db import models
+from django.utils.functional import LazyObject
 
 
 class CustomValidNameStorage(FileSystemStorage):
@@ -27,10 +28,19 @@ def callable_storage():
     return temp_storage
 
 
+def callable_default_storage():
+    return default_storage
+
+
 class CallableStorage(FileSystemStorage):
     def __call__(self):
         # no-op implementation.
         return self
+
+
+class LazyTempStorage(LazyObject):
+    def _setup(self):
+        self._wrapped = temp_storage
 
 
 class Storage(models.Model):
@@ -62,13 +72,20 @@ class Storage(models.Model):
     storage_callable_class = models.FileField(
         storage=CallableStorage, upload_to="storage_callable_class"
     )
+    storage_callable_default = models.FileField(
+        storage=callable_default_storage, upload_to="storage_callable_default"
+    )
     default = models.FileField(
         storage=temp_storage, upload_to="tests", default="tests/default.txt"
+    )
+    db_default = models.FileField(
+        storage=temp_storage, upload_to="tests", db_default="tests/db_default.txt"
     )
     empty = models.FileField(storage=temp_storage)
     limited_length = models.FileField(
         storage=temp_storage, upload_to="tests", max_length=20
     )
     extended_length = models.FileField(
-        storage=temp_storage, upload_to="tests", max_length=300
+        storage=temp_storage, upload_to="tests", max_length=1024
     )
+    lazy_storage = models.FileField(storage=LazyTempStorage(), upload_to="tests")

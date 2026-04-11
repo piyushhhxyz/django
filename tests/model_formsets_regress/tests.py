@@ -259,7 +259,7 @@ class InlineFormsetTests(TestCase):
 
         self.assertTrue(formset.is_valid())
         formset.save()
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             dalnet.host_set.order_by("hostname"),
             Host.objects.filter(
                 hostname__in=[
@@ -407,7 +407,8 @@ class BaseCustomDeleteFormSet(BaseFormSet):
     A formset mix-in that lets a form decide if it's to be deleted.
     Works for BaseFormSets. Also works for ModelFormSets with #14099 fixed.
 
-    form.should_delete() is called. The formset delete field is also suppressed.
+    form.should_delete() is called. The formset delete field is also
+    suppressed.
     """
 
     def add_fields(self, form, index):

@@ -1,5 +1,4 @@
 import json
-import os
 import tempfile
 import uuid
 
@@ -7,14 +6,28 @@ from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelatio
 from django.contrib.contenttypes.models import ContentType
 from django.core.files.storage import FileSystemStorage
 from django.core.serializers.json import DjangoJSONEncoder
-from django.db import models
+from django.db import connection, models
+from django.db.models import F, Value
 from django.db.models.fields.files import ImageFieldFile
+from django.db.models.functions import Cast, Lower
+from django.utils.functional import SimpleLazyObject
 from django.utils.translation import gettext_lazy as _
+
+from .storage import NoReadFileSystemStorage
 
 try:
     from PIL import Image
 except ImportError:
     Image = None
+
+
+# Set up a temp directory for file storage.
+temp_storage_dir = tempfile.mkdtemp()
+temp_storage = FileSystemStorage(temp_storage_dir)
+
+test_collation = SimpleLazyObject(
+    lambda: connection.features.test_collations["virtual"]
+)
 
 
 class Foo(models.Model):
@@ -32,24 +45,18 @@ class Bar(models.Model):
 
 
 class Whiz(models.Model):
-    CHOICES = (
-        (
-            "Group 1",
-            (
-                (1, "First"),
-                (2, "Second"),
-            ),
+    CHOICES = {
+        "Group 1": {
+            1: "First",
+            2: "Second",
+        },
+        "Group 2": (
+            (3, "Third"),
+            (4, "Fourth"),
         ),
-        (
-            "Group 2",
-            (
-                (3, "Third"),
-                (4, "Fourth"),
-            ),
-        ),
-        (0, "Other"),
-        (5, _("translated")),
-    )
+        0: "Other",
+        5: _("translated"),
+    }
     c = models.IntegerField(choices=CHOICES, null=True)
 
 
@@ -62,7 +69,7 @@ WhizDelayed._meta.get_field("c").choices = Whiz.CHOICES
 
 
 class WhizIter(models.Model):
-    c = models.IntegerField(choices=iter(Whiz.CHOICES), null=True)
+    c = models.IntegerField(choices=iter(Whiz.CHOICES.items()), null=True)
 
 
 class WhizIterEmpty(models.Model):
@@ -70,15 +77,32 @@ class WhizIterEmpty(models.Model):
 
 
 class Choiceful(models.Model):
+    class Suit(models.IntegerChoices):
+        DIAMOND = 1, "Diamond"
+        SPADE = 2, "Spade"
+        HEART = 3, "Heart"
+        CLUB = 4, "Club"
+
+    def get_choices():
+        return [(i, str(i)) for i in range(3)]
+
     no_choices = models.IntegerField(null=True)
     empty_choices = models.IntegerField(choices=(), null=True)
     with_choices = models.IntegerField(choices=[(1, "A")], null=True)
+    with_choices_dict = models.IntegerField(choices={1: "A"}, null=True)
+    with_choices_nested_dict = models.IntegerField(
+        choices={"Thing": {1: "A"}}, null=True
+    )
     empty_choices_bool = models.BooleanField(choices=())
     empty_choices_text = models.TextField(choices=())
+    choices_from_enum = models.IntegerField(choices=Suit)
+    choices_from_iterator = models.IntegerField(choices=((i, str(i)) for i in range(3)))
+    choices_from_callable = models.IntegerField(choices=get_choices)
 
 
 class BigD(models.Model):
     d = models.DecimalField(max_digits=32, decimal_places=30)
+    large_int = models.DecimalField(max_digits=16, decimal_places=0, null=True)
 
 
 class FloatModel(models.Model):
@@ -141,7 +165,6 @@ class NullBooleanModel(models.Model):
 
 class BooleanModel(models.Model):
     bfield = models.BooleanField()
-    string = models.CharField(max_length=10, default="abc")
 
 
 class DateTimeModel(models.Model):
@@ -188,7 +211,9 @@ class VerboseNameField(models.Model):
     field5 = models.DateTimeField("verbose field5")
     field6 = models.DecimalField("verbose field6", max_digits=6, decimal_places=1)
     field7 = models.EmailField("verbose field7")
-    field8 = models.FileField("verbose field8", upload_to="unused")
+    field8 = models.FileField(
+        "verbose field8", storage=temp_storage, upload_to="unused"
+    )
     field9 = models.FilePathField("verbose field9")
     field10 = models.FloatField("verbose field10")
     # Don't want to depend on Pillow in this test
@@ -214,6 +239,7 @@ class GenericIPAddress(models.Model):
 # These models aren't used in any test, just here to ensure they validate
 # successfully.
 
+
 # See ticket #16570.
 class DecimalLessThanOne(models.Model):
     d = models.DecimalField(max_digits=3, decimal_places=3)
@@ -236,8 +262,18 @@ class DataModel(models.Model):
 # FileField
 
 
+def upload_to_with_date(instance, filename):
+    return f"{instance.created_at.year}/{filename}"
+
+
 class Document(models.Model):
-    myfile = models.FileField(upload_to="unused", unique=True)
+    myfile = models.FileField(storage=temp_storage, upload_to="unused", unique=True)
+
+
+# See ticket #36847.
+class DocumentWithTimestamp(models.Model):
+    created_at = models.DateTimeField(auto_now_add=True)
+    myfile = models.FileField(storage=temp_storage, upload_to=upload_to_with_date)
 
 
 ###############################################################################
@@ -262,11 +298,6 @@ if Image:
 
     class TestImageField(models.ImageField):
         attr_class = TestImageFieldFile
-
-    # Set up a temp directory for file storage.
-    temp_storage_dir = tempfile.mkdtemp()
-    temp_storage = FileSystemStorage(temp_storage_dir)
-    temp_upload_to_dir = os.path.join(temp_storage.location, "tests")
 
     class Person(models.Model):
         """
@@ -357,6 +388,21 @@ if Image:
             width_field="headshot_width",
         )
 
+    class PersonNoReadImage(models.Model):
+        """
+        Model that defines an ImageField with a storage backend that does not
+        support reading.
+        """
+
+        mugshot = models.ImageField(
+            upload_to="tests",
+            storage=NoReadFileSystemStorage(temp_storage_dir),
+            width_field="mugshot_width",
+            height_field="mugshot_height",
+        )
+        mugshot_width = models.IntegerField()
+        mugshot_height = models.IntegerField()
+
 
 class CustomJSONDecoder(json.JSONDecoder):
     def __init__(self, object_hook=None, *args, **kwargs):
@@ -366,6 +412,13 @@ class CustomJSONDecoder(json.JSONDecoder):
         if "uuid" in dct:
             dct["uuid"] = uuid.UUID(dct["uuid"])
         return dct
+
+
+class JSONNullCustomEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, models.JSONNull):
+            return None
+        return super().default(o)
 
 
 class JSONModel(models.Model):
@@ -387,12 +440,36 @@ class NullableJSONModel(models.Model):
         required_db_features = {"supports_json_field"}
 
 
-class RelatedJSONModel(models.Model):
-    value = models.JSONField()
-    json_model = models.ForeignKey(NullableJSONModel, models.CASCADE)
+class JSONNullDefaultModel(models.Model):
+    value = models.JSONField(
+        db_default=models.JSONNull(), encoder=JSONNullCustomEncoder
+    )
 
     class Meta:
         required_db_features = {"supports_json_field"}
+
+
+class RelatedJSONModel(models.Model):
+    value = models.JSONField()
+    json_model = models.ForeignKey(NullableJSONModel, models.CASCADE)
+    summary = models.CharField(max_length=100, null=True, blank=True)
+
+    class Meta:
+        required_db_features = {"supports_json_field"}
+
+
+class CustomSerializationJSONModel(models.Model):
+    class StringifiedJSONField(models.JSONField):
+        def get_prep_value(self, value):
+            return json.dumps(value, cls=self.encoder)
+
+    json_field = StringifiedJSONField()
+
+    class Meta:
+        required_db_features = {
+            "supports_json_field",
+            "supports_primitives_in_json_field",
+        }
 
 
 class AllFieldsModel(models.Model):
@@ -464,3 +541,202 @@ class UUIDChild(PrimaryKeyUUIDModel):
 
 class UUIDGrandchild(UUIDChild):
     pass
+
+
+class GeneratedModelFieldWithConverters(models.Model):
+    field = models.UUIDField()
+    field_copy = models.GeneratedField(
+        expression=Cast("field", models.UUIDField()),
+        output_field=models.UUIDField(),
+        db_persist=True,
+    )
+
+    class Meta:
+        required_db_features = {"supports_stored_generated_columns"}
+
+
+class GeneratedModel(models.Model):
+    a = models.IntegerField()
+    b = models.IntegerField()
+    field = models.GeneratedField(
+        expression=F("a") + F("b"),
+        output_field=models.IntegerField(),
+        db_persist=True,
+    )
+    fk = models.ForeignKey(Foo, on_delete=models.CASCADE, null=True, blank=True)
+
+    class Meta:
+        required_db_features = {"supports_stored_generated_columns"}
+
+
+class GeneratedModelNonAutoPk(models.Model):
+    id = models.IntegerField(primary_key=True)
+    a = models.IntegerField()
+    b = models.GeneratedField(
+        expression=F("a") + 1,
+        output_field=models.IntegerField(),
+        db_persist=True,
+    )
+
+    class Meta:
+        required_db_features = {"supports_stored_generated_columns"}
+
+
+class GeneratedModelVirtual(models.Model):
+    a = models.IntegerField()
+    b = models.IntegerField()
+    field = models.GeneratedField(
+        expression=F("a") + F("b"),
+        output_field=models.IntegerField(),
+        db_persist=False,
+    )
+    fk = models.ForeignKey(Foo, on_delete=models.CASCADE, null=True, blank=True)
+
+    class Meta:
+        required_db_features = {"supports_virtual_generated_columns"}
+
+
+class GeneratedModelParams(models.Model):
+    field = models.GeneratedField(
+        expression=Value("Constant", output_field=models.CharField(max_length=10)),
+        output_field=models.CharField(max_length=10),
+        db_persist=True,
+    )
+
+    class Meta:
+        required_db_features = {"supports_stored_generated_columns"}
+
+
+class GeneratedModelParamsVirtual(models.Model):
+    field = models.GeneratedField(
+        expression=Value("Constant", output_field=models.CharField(max_length=10)),
+        output_field=models.CharField(max_length=10),
+        db_persist=False,
+    )
+
+    class Meta:
+        required_db_features = {"supports_virtual_generated_columns"}
+
+
+class GeneratedModelOutputFieldDbCollation(models.Model):
+    name = models.CharField(max_length=10)
+    lower_name = models.GeneratedField(
+        expression=Lower("name"),
+        output_field=models.CharField(db_collation=test_collation, max_length=11),
+        db_persist=True,
+    )
+
+    class Meta:
+        required_db_features = {"supports_stored_generated_columns"}
+
+
+class GeneratedModelOutputFieldDbCollationVirtual(models.Model):
+    name = models.CharField(max_length=10)
+    lower_name = models.GeneratedField(
+        expression=Lower("name"),
+        db_persist=False,
+        output_field=models.CharField(db_collation=test_collation, max_length=11),
+    )
+
+    class Meta:
+        required_db_features = {"supports_virtual_generated_columns"}
+
+
+class GeneratedModelNull(models.Model):
+    name = models.CharField(max_length=10, null=True)
+    lower_name = models.GeneratedField(
+        expression=Lower("name"),
+        output_field=models.CharField(max_length=10),
+        db_persist=True,
+    )
+
+    class Meta:
+        required_db_features = {"supports_stored_generated_columns"}
+
+
+class GeneratedModelNullVirtual(models.Model):
+    name = models.CharField(max_length=10, null=True)
+    lower_name = models.GeneratedField(
+        expression=Lower("name"),
+        output_field=models.CharField(max_length=10),
+        db_persist=False,
+    )
+
+    class Meta:
+        required_db_features = {"supports_virtual_generated_columns"}
+
+
+class GeneratedModelBase(models.Model):
+    a = models.IntegerField()
+    a_squared = models.GeneratedField(
+        expression=F("a") * F("a"),
+        output_field=models.IntegerField(),
+        db_persist=True,
+    )
+
+    class Meta:
+        abstract = True
+
+
+class GeneratedModelVirtualBase(models.Model):
+    a = models.IntegerField()
+    a_squared = models.GeneratedField(
+        expression=F("a") * F("a"),
+        output_field=models.IntegerField(),
+        db_persist=False,
+    )
+
+    class Meta:
+        abstract = True
+
+
+class GeneratedModelCheckConstraint(GeneratedModelBase):
+    class Meta:
+        required_db_features = {
+            "supports_stored_generated_columns",
+            "supports_table_check_constraints",
+        }
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(a__gt=0),
+                name="Generated model check constraint a > 0",
+            )
+        ]
+
+
+class GeneratedModelCheckConstraintVirtual(GeneratedModelVirtualBase):
+    class Meta:
+        required_db_features = {
+            "supports_virtual_generated_columns",
+            "supports_table_check_constraints",
+        }
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(a__gt=0),
+                name="Generated model check constraint virtual a > 0",
+            )
+        ]
+
+
+class GeneratedModelUniqueConstraint(GeneratedModelBase):
+    class Meta:
+        required_db_features = {
+            "supports_stored_generated_columns",
+            "supports_expression_indexes",
+        }
+        constraints = [
+            models.UniqueConstraint(F("a"), name="Generated model unique constraint a"),
+        ]
+
+
+class GeneratedModelUniqueConstraintVirtual(GeneratedModelVirtualBase):
+    class Meta:
+        required_db_features = {
+            "supports_virtual_generated_columns",
+            "supports_expression_indexes",
+        }
+        constraints = [
+            models.UniqueConstraint(
+                F("a"), name="Generated model unique constraint virtual a"
+            ),
+        ]

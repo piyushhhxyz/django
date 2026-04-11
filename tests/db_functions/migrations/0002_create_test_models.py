@@ -2,7 +2,6 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("db_functions", "0001_setup_extensions"),
     ]
@@ -11,6 +10,15 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name="Author",
             fields=[
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
                 ("name", models.CharField(max_length=50)),
                 ("alias", models.CharField(max_length=50, null=True, blank=True)),
                 ("goes_by", models.CharField(max_length=50, null=True, blank=True)),
@@ -20,6 +28,15 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name="Article",
             fields=[
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
                 (
                     "authors",
                     models.ManyToManyField(
@@ -38,6 +55,15 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name="Fan",
             fields=[
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
                 ("name", models.CharField(max_length=50)),
                 ("age", models.PositiveSmallIntegerField(default=30)),
                 (
@@ -52,6 +78,15 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name="DTModel",
             fields=[
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
                 ("name", models.CharField(max_length=32)),
                 ("start_datetime", models.DateTimeField(null=True, blank=True)),
                 ("end_datetime", models.DateTimeField(null=True, blank=True)),
@@ -65,6 +100,15 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name="DecimalModel",
             fields=[
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
                 ("n1", models.DecimalField(decimal_places=2, max_digits=6)),
                 (
                     "n2",
@@ -77,6 +121,15 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name="IntegerModel",
             fields=[
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
                 ("big", models.BigIntegerField(null=True, blank=True)),
                 ("normal", models.IntegerField(null=True, blank=True)),
                 ("small", models.SmallIntegerField(null=True, blank=True)),
@@ -85,8 +138,33 @@ class Migration(migrations.Migration):
         migrations.CreateModel(
             name="FloatModel",
             fields=[
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
                 ("f1", models.FloatField(null=True, blank=True)),
                 ("f2", models.FloatField(null=True, blank=True)),
+            ],
+        ),
+        migrations.CreateModel(
+            name="UUIDModel",
+            fields=[
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("uuid", models.UUIDField(null=True)),
+                ("shift", models.DurationField(null=True)),
             ],
         ),
     ]

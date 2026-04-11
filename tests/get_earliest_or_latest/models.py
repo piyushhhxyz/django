@@ -16,6 +16,19 @@ class Person(models.Model):
     # Note that this model doesn't have "get_latest_by" set.
 
 
+class Comment(models.Model):
+    article = models.ForeignKey(Article, on_delete=models.CASCADE)
+    likes_count = models.PositiveIntegerField()
+
+
+class OrderedArticle(models.Model):
+    headline = models.CharField(max_length=100)
+    pub_date = models.DateField()
+
+    class Meta:
+        ordering = ["headline"]
+
+
 # Ticket #23555 - model with an intentionally broken QuerySet.__iter__ method.
 
 

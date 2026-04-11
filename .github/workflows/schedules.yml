@@ -5,11 +5,16 @@ on:
     - cron: '42 2 * * *'
   workflow_dispatch:
 
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   trigger-runs:
     runs-on: ubuntu-latest
     environment: schedules
     name: Trigger Full Build
+    timeout-minutes: 60
     # Only trigger on the main Django repository
     if: (github.event_name == 'schedule' && github.repository == 'django/django') || (github.event_name != 'schedule')
     strategy:
@@ -17,7 +22,7 @@ jobs:
         branch:
           - main
     steps:
-      - uses: actions/github-script@v6
+      - uses: actions/github-script@v8
         with:
           github-token: ${{secrets.SCHEDULE_WORKFLOW_TOKEN}}
           script: |
@@ -38,5 +43,5 @@ jobs:
                 ref: '${{ matrix.branch }}',
               })
             } else {
-              console.log(`No commits found since ${yesterday} on brach ${{ matrix.branch }}`)
+              console.log(`No commits found since ${yesterday} on branch ${{ matrix.branch }}`)
             }

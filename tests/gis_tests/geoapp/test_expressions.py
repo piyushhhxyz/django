@@ -54,6 +54,7 @@ class GeoExpressionsTests(TestCase):
                 obj.point3.equals_exact(p1.transform(3857, clone=True), 0.1)
             )
 
+    @skipUnlessDBFeature("has_Distance_function")
     def test_multiple_annotation(self):
         multi_field = MultiFields.objects.create(
             point=Point(1, 1),
@@ -62,6 +63,7 @@ class GeoExpressionsTests(TestCase):
         )
         qs = (
             City.objects.values("name")
+            .order_by("name")
             .annotate(
                 distance=Min(
                     functions.Distance("multifields__point", multi_field.city.point)

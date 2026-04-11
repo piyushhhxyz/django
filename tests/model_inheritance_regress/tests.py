@@ -1,11 +1,13 @@
 """
 Regression tests for Model inheritance behavior.
 """
+
 import datetime
 from operator import attrgetter
 from unittest import expectedFailure
 
 from django import forms
+from django.db.models import FETCH_PEERS
 from django.test import TestCase
 
 from .models import (
@@ -416,11 +418,6 @@ class ModelInheritanceTest(TestCase):
         parties = list(p4.bachelorparty_set.all())
         self.assertEqual(parties, [bachelor, messy_parent])
 
-    def test_abstract_base_class_m2m_relation_inheritance_manager_reused(self):
-        p1 = Person.objects.create(name="Alice")
-        self.assertIs(p1.birthdayparty_set, p1.birthdayparty_set)
-        self.assertIs(p1.bachelorparty_set, p1.bachelorparty_set)
-
     def test_abstract_verbose_name_plural_inheritance(self):
         """
         verbose_name_plural correctly inherited from ABC if inheritance chain
@@ -434,16 +431,17 @@ class ModelInheritanceTest(TestCase):
 
     def test_inherited_nullable_exclude(self):
         obj = SelfRefChild.objects.create(child_data=37, parent_data=42)
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             SelfRefParent.objects.exclude(self_data=72), [obj.pk], attrgetter("pk")
         )
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             SelfRefChild.objects.exclude(self_data=72), [obj.pk], attrgetter("pk")
         )
 
     def test_concrete_abstract_concrete_pk(self):
         """
-        Primary key set correctly with concrete->abstract->concrete inheritance.
+        Primary key set correctly with concrete->abstract->concrete
+        inheritance.
         """
         # Regression test for #13987: Primary key is incorrectly determined
         # when more than one model has a concrete->abstract->concrete
@@ -529,7 +527,7 @@ class ModelInheritanceTest(TestCase):
         Supplier.objects.create(name="John", restaurant=r1)
         Supplier.objects.create(name="Jane", restaurant=r2)
 
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             Supplier.objects.order_by("name").select_related(),
             [
                 "Jane",
@@ -602,6 +600,22 @@ class ModelInheritanceTest(TestCase):
             restaurant = italian_restaurant.restaurant_ptr
             self.assertEqual(restaurant.place_ptr.restaurant, restaurant)
             self.assertEqual(restaurant.italianrestaurant, italian_restaurant)
+
+    def test_parent_access_copies_fetch_mode(self):
+        italian_restaurant = ItalianRestaurant.objects.create(
+            name="Mom's Spaghetti",
+            address="2131 Woodward Ave",
+            serves_hot_dogs=False,
+            serves_pizza=False,
+            serves_gnocchi=True,
+        )
+
+        # No queries are made when accessing the parent objects.
+        italian_restaurant = ItalianRestaurant.objects.fetch_mode(FETCH_PEERS).get(
+            pk=italian_restaurant.pk
+        )
+        restaurant = italian_restaurant.restaurant_ptr
+        self.assertEqual(restaurant._state.fetch_mode, FETCH_PEERS)
 
     def test_id_field_update_on_ancestor_change(self):
         place1 = Place.objects.create(name="House of Pasta", address="944 Fullerton")

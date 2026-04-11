@@ -143,7 +143,7 @@ class ConditionalGet(SimpleTestCase):
         self.assertEqual(response.status_code, 412)
 
     def test_both_headers(self):
-        # see https://tools.ietf.org/html/rfc7232#section-6
+        # See RFC 9110 Section 13.2.2.
         self.client.defaults["HTTP_IF_MODIFIED_SINCE"] = LAST_MODIFIED_STR
         self.client.defaults["HTTP_IF_NONE_MATCH"] = ETAG
         response = self.client.get("/condition/")
@@ -257,7 +257,7 @@ class ConditionalGet(SimpleTestCase):
         self.assertEqual(response_quoted["ETag"], response_unquoted["ETag"])
 
     # It's possible that the matching algorithm could use the wrong value even
-    # if the ETag header is set correctly correctly (as tested by
+    # if the ETag header is set correctly (as tested by
     # test_unquoted()), so check that the unquoted value is matched.
     def test_unquoted_if_none_match(self):
         self.client.defaults["HTTP_IF_NONE_MATCH"] = ETAG

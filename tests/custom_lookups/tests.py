@@ -4,6 +4,9 @@ from datetime import date, datetime
 
 from django.core.exceptions import FieldError
 from django.db import connection, models
+from django.db.models.fields.related_lookups import RelatedGreaterThan
+from django.db.models.functions import Lower
+from django.db.models.lookups import EndsWith, StartsWith
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.test.utils import register_lookup
 from django.utils import timezone
@@ -15,15 +18,15 @@ class Div3Lookup(models.Lookup):
     lookup_name = "div3"
 
     def as_sql(self, compiler, connection):
-        lhs, params = self.process_lhs(compiler, connection)
+        lhs, lhs_params = self.process_lhs(compiler, connection)
         rhs, rhs_params = self.process_rhs(compiler, connection)
-        params.extend(rhs_params)
+        params = (*lhs_params, *rhs_params)
         return "(%s) %%%% 3 = %s" % (lhs, rhs), params
 
     def as_oracle(self, compiler, connection):
-        lhs, params = self.process_lhs(compiler, connection)
+        lhs, lhs_params = self.process_lhs(compiler, connection)
         rhs, rhs_params = self.process_rhs(compiler, connection)
-        params.extend(rhs_params)
+        params = (*lhs_params, *rhs_params)
         return "mod(%s, 3) = %s" % (lhs, rhs), params
 
 
@@ -75,7 +78,7 @@ class YearTransform(models.Transform):
 
     def as_sql(self, compiler, connection):
         lhs_sql, params = compiler.compile(self.lhs)
-        return connection.ops.date_extract_sql("year", lhs_sql), params
+        return connection.ops.date_extract_sql("year", lhs_sql, params)
 
     @property
     def output_field(self):
@@ -116,7 +119,7 @@ class YearLte(models.lookups.LessThanOrEqual):
         real_lhs = self.lhs.lhs
         lhs_sql, params = self.process_lhs(compiler, connection, real_lhs)
         rhs_sql, rhs_params = self.process_rhs(compiler, connection)
-        params.extend(rhs_params)
+        params = (*params, *rhs_params)
         # Build SQL where the integer year is concatenated with last month
         # and day, then convert that to date. (We try to have SQL like:
         #     WHERE somecol <= '2013-12-31')
@@ -220,19 +223,65 @@ class DateTimeTransform(models.Transform):
         return "from_unixtime({})".format(lhs), params
 
 
+class CustomStartsWith(StartsWith):
+    lookup_name = "sw"
+
+
+class CustomEndsWith(EndsWith):
+    lookup_name = "ew"
+
+
+class RelatedMoreThan(RelatedGreaterThan):
+    lookup_name = "rmt"
+
+
 class LookupTests(TestCase):
     def test_custom_name_lookup(self):
         a1 = Author.objects.create(name="a1", birthdate=date(1981, 2, 16))
         Author.objects.create(name="a2", birthdate=date(2012, 2, 29))
-        with register_lookup(models.DateField, YearTransform), register_lookup(
-            models.DateField, YearTransform, lookup_name="justtheyear"
-        ), register_lookup(YearTransform, Exactly), register_lookup(
-            YearTransform, Exactly, lookup_name="isactually"
+        with (
+            register_lookup(models.DateField, YearTransform),
+            register_lookup(models.DateField, YearTransform, lookup_name="justtheyear"),
+            register_lookup(YearTransform, Exactly),
+            register_lookup(YearTransform, Exactly, lookup_name="isactually"),
         ):
             qs1 = Author.objects.filter(birthdate__testyear__exactly=1981)
             qs2 = Author.objects.filter(birthdate__justtheyear__isactually=1981)
             self.assertSequenceEqual(qs1, [a1])
             self.assertSequenceEqual(qs2, [a1])
+
+    def test_custom_lookup_with_subquery(self):
+        class NotEqual(models.Lookup):
+            lookup_name = "ne"
+
+            def as_sql(self, compiler, connection):
+                lhs, lhs_params = self.process_lhs(compiler, connection)
+                rhs, rhs_params = self.process_rhs(compiler, connection)
+                # Although combining via (*lhs_params, *rhs_params) would be
+                # more resilient, the "simple" way works too.
+                params = lhs_params + rhs_params
+                return "%s <> %s" % (lhs, rhs), params
+
+        author = Author.objects.create(name="Isabella")
+
+        with register_lookup(models.Field, NotEqual):
+            qs = Author.objects.annotate(
+                unknown_age=models.Subquery(
+                    Author.objects.filter(age__isnull=True)
+                    .order_by("name")
+                    .values("name")[:1]
+                )
+            ).filter(unknown_age__ne="Plato")
+            self.assertSequenceEqual(qs, [author])
+
+            qs = Author.objects.annotate(
+                unknown_age=Lower(
+                    Author.objects.filter(age__isnull=True)
+                    .order_by("name")
+                    .values("name")[:1]
+                )
+            ).filter(unknown_age__ne="plato")
+            self.assertSequenceEqual(qs, [author])
 
     def test_custom_exact_lookup_none_rhs(self):
         """
@@ -316,7 +365,7 @@ class LookupTests(TestCase):
         field = Article._meta.get_field("author")
 
         # clear and re-cache
-        field.get_lookups.cache_clear()
+        field.get_class_lookups.cache_clear()
         self.assertNotIn("exactly", field.get_lookups())
 
         # registration should bust the cache
@@ -359,7 +408,7 @@ class BilateralTransformTests(TestCase):
                     Author(name="Ray"),
                 ]
             )
-            self.assertQuerysetEqual(
+            self.assertQuerySetEqual(
                 Author.objects.filter(name__upper__in=["foo", "bar", "doe"]).order_by(
                     "name"
                 ),
@@ -446,9 +495,7 @@ class YearLteTests(TestCase):
 
     def setUp(self):
         models.DateField.register_lookup(YearTransform)
-
-    def tearDown(self):
-        models.DateField._unregister_lookup(YearTransform)
+        self.addCleanup(models.DateField._unregister_lookup, YearTransform)
 
     @unittest.skipUnless(
         connection.vendor == "postgresql", "PostgreSQL specific SQL used"
@@ -505,7 +552,8 @@ class YearLteTests(TestCase):
 
     def test_custom_implementation_year_exact(self):
         try:
-            # Two ways to add a customized implementation for different backends:
+            # Two ways to add a customized implementation for different
+            # backends:
             # First is MonkeyPatch of the class.
             def as_custom_sql(self, compiler, connection):
                 lhs_sql, lhs_params = self.process_lhs(
@@ -601,6 +649,10 @@ class LookupTransformCallOrderTests(SimpleTestCase):
             )
             TrackCallsYearTransform.call_order = []
             # junk transform - tries transform only, then fails
+            msg = (
+                "Unsupported lookup 'junk__more_junk' for IntegerField or join"
+                " on the field not permitted."
+            )
             with self.assertRaisesMessage(FieldError, msg):
                 Author.objects.filter(birthdate__testyear__junk__more_junk=2012)
             self.assertEqual(TrackCallsYearTransform.call_order, ["transform"])
@@ -614,7 +666,7 @@ class LookupTransformCallOrderTests(SimpleTestCase):
             self.assertEqual(TrackCallsYearTransform.call_order, ["lookup"])
 
 
-class CustomisedMethodsTests(SimpleTestCase):
+class CustomizedMethodsTests(SimpleTestCase):
     def test_overridden_get_lookup(self):
         q = CustomModel.objects.filter(field__lookupfunc_monkeys=3)
         self.assertIn("monkeys()", str(q.query))
@@ -647,3 +699,78 @@ class SubqueryTransformTests(TestCase):
                 id__in=Author.objects.filter(age__div3=2)
             )
             self.assertSequenceEqual(qs, [a2])
+
+
+class RegisterLookupTests(SimpleTestCase):
+    def test_class_lookup(self):
+        author_name = Author._meta.get_field("name")
+        with register_lookup(models.CharField, CustomStartsWith):
+            self.assertEqual(author_name.get_lookup("sw"), CustomStartsWith)
+        self.assertIsNone(author_name.get_lookup("sw"))
+
+    def test_instance_lookup(self):
+        author_name = Author._meta.get_field("name")
+        author_alias = Author._meta.get_field("alias")
+        with register_lookup(author_name, CustomStartsWith):
+            self.assertEqual(author_name.instance_lookups, {"sw": CustomStartsWith})
+            self.assertEqual(author_name.get_lookup("sw"), CustomStartsWith)
+            self.assertIsNone(author_alias.get_lookup("sw"))
+        self.assertIsNone(author_name.get_lookup("sw"))
+        self.assertEqual(author_name.instance_lookups, {})
+        self.assertIsNone(author_alias.get_lookup("sw"))
+
+    def test_instance_lookup_override_class_lookups(self):
+        author_name = Author._meta.get_field("name")
+        author_alias = Author._meta.get_field("alias")
+        with register_lookup(models.CharField, CustomStartsWith, lookup_name="st_end"):
+            with register_lookup(author_alias, CustomEndsWith, lookup_name="st_end"):
+                self.assertEqual(author_name.get_lookup("st_end"), CustomStartsWith)
+                self.assertEqual(author_alias.get_lookup("st_end"), CustomEndsWith)
+            self.assertEqual(author_name.get_lookup("st_end"), CustomStartsWith)
+            self.assertEqual(author_alias.get_lookup("st_end"), CustomStartsWith)
+        self.assertIsNone(author_name.get_lookup("st_end"))
+        self.assertIsNone(author_alias.get_lookup("st_end"))
+
+    def test_instance_lookup_override(self):
+        author_name = Author._meta.get_field("name")
+        with register_lookup(author_name, CustomStartsWith, lookup_name="st_end"):
+            self.assertEqual(author_name.get_lookup("st_end"), CustomStartsWith)
+            author_name.register_lookup(CustomEndsWith, lookup_name="st_end")
+            self.assertEqual(author_name.get_lookup("st_end"), CustomEndsWith)
+        self.assertIsNone(author_name.get_lookup("st_end"))
+
+    def test_lookup_on_transform(self):
+        transform = Div3Transform
+        with register_lookup(Div3Transform, CustomStartsWith):
+            with register_lookup(Div3Transform, CustomEndsWith):
+                self.assertEqual(
+                    transform.get_lookups(),
+                    {"sw": CustomStartsWith, "ew": CustomEndsWith},
+                )
+            self.assertEqual(transform.get_lookups(), {"sw": CustomStartsWith})
+        self.assertEqual(transform.get_lookups(), {})
+
+    def test_transform_on_field(self):
+        author_name = Author._meta.get_field("name")
+        author_alias = Author._meta.get_field("alias")
+        with register_lookup(models.CharField, Div3Transform):
+            self.assertEqual(author_alias.get_transform("div3"), Div3Transform)
+            self.assertEqual(author_name.get_transform("div3"), Div3Transform)
+        with register_lookup(author_alias, Div3Transform):
+            self.assertEqual(author_alias.get_transform("div3"), Div3Transform)
+            self.assertIsNone(author_name.get_transform("div3"))
+        self.assertIsNone(author_alias.get_transform("div3"))
+        self.assertIsNone(author_name.get_transform("div3"))
+
+    def test_related_lookup(self):
+        article_author = Article._meta.get_field("author")
+        with register_lookup(models.Field, CustomStartsWith):
+            self.assertIsNone(article_author.get_lookup("sw"))
+        with register_lookup(models.ForeignKey, RelatedMoreThan):
+            self.assertEqual(article_author.get_lookup("rmt"), RelatedMoreThan)
+
+    def test_instance_related_lookup(self):
+        article_author = Article._meta.get_field("author")
+        with register_lookup(article_author, RelatedMoreThan):
+            self.assertEqual(article_author.get_lookup("rmt"), RelatedMoreThan)
+        self.assertIsNone(article_author.get_lookup("rmt"))

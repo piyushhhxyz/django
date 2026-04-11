@@ -1,17 +1,20 @@
 import time
 import traceback
 from datetime import date, datetime, timedelta
-from threading import Thread
+from threading import Event, Thread, Timer
+from unittest.mock import patch
 
 from django.core.exceptions import FieldError
 from django.db import DatabaseError, IntegrityError, connection
 from django.test import TestCase, TransactionTestCase, skipUnlessDBFeature
+from django.test.utils import CaptureQueriesContext
 from django.utils.functional import lazy
 
 from .models import (
     Author,
     Book,
     DefaultPerson,
+    Journalist,
     ManualPrimaryKeyTest,
     Person,
     Profile,
@@ -122,7 +125,8 @@ class GetOrCreateTests(TestCase):
         # Create an Author not tied to any books.
         Author.objects.create(name="Ted")
 
-        # There should be three Authors in total. The book object should have two.
+        # There should be three Authors in total. The book object should have
+        # two.
         self.assertEqual(Author.objects.count(), 3)
         self.assertEqual(book.authors.count(), 2)
 
@@ -225,19 +229,6 @@ class GetOrCreateTestsWithManualPKs(TestCase):
             ManualPrimaryKeyTest.objects.get_or_create(id=1, data="Different")
         self.assertEqual(ManualPrimaryKeyTest.objects.get(id=1).data, "Original")
 
-    def test_get_or_create_raises_IntegrityError_plus_traceback(self):
-        """
-        get_or_create should raise IntegrityErrors with the full traceback.
-        This is tested by checking that a known method call is in the traceback.
-        We cannot use assertRaises here because we need to inspect
-        the actual traceback. Refs #16340.
-        """
-        try:
-            ManualPrimaryKeyTest.objects.get_or_create(id=1, data="Different")
-        except IntegrityError:
-            formatted_traceback = traceback.format_exc()
-            self.assertIn("obj.save", formatted_traceback)
-
     def test_savepoint_rollback(self):
         """
         The database connection is still usable after a DatabaseError in
@@ -260,7 +251,6 @@ class GetOrCreateTestsWithManualPKs(TestCase):
 
 
 class GetOrCreateTransactionTests(TransactionTestCase):
-
     available_apps = ["get_or_create"]
 
     def test_get_or_create_integrityerror(self):
@@ -329,15 +319,24 @@ class UpdateOrCreateTests(TestCase):
         self.assertEqual(p.birthday, date(1940, 10, 10))
 
     def test_create_twice(self):
-        params = {
-            "first_name": "John",
-            "last_name": "Lennon",
-            "birthday": date(1940, 10, 10),
-        }
-        Person.objects.update_or_create(**params)
-        # If we execute the exact same statement, it won't create a Person.
-        p, created = Person.objects.update_or_create(**params)
-        self.assertFalse(created)
+        p, created = Person.objects.update_or_create(
+            first_name="John",
+            last_name="Lennon",
+            create_defaults={"birthday": date(1940, 10, 10)},
+            defaults={"birthday": date(1950, 2, 2)},
+        )
+        self.assertIs(created, True)
+        self.assertEqual(p.birthday, date(1940, 10, 10))
+        # If we execute the exact same statement, it won't create a Person, but
+        # will update the birthday.
+        p, created = Person.objects.update_or_create(
+            first_name="John",
+            last_name="Lennon",
+            create_defaults={"birthday": date(1940, 10, 10)},
+            defaults={"birthday": date(1950, 2, 2)},
+        )
+        self.assertIs(created, False)
+        self.assertEqual(p.birthday, date(1950, 2, 2))
 
     def test_integrity(self):
         """
@@ -365,7 +364,7 @@ class UpdateOrCreateTests(TestCase):
 
     def test_update_or_create_with_model_property_defaults(self):
         """Using a property with a setter implemented is allowed."""
-        t, _ = Thing.objects.get_or_create(
+        t, _ = Thing.objects.update_or_create(
             defaults={"capitalized_name_property": "annie"}, pk=1
         )
         self.assertEqual(t.name, "Annie")
@@ -373,9 +372,9 @@ class UpdateOrCreateTests(TestCase):
     def test_error_contains_full_traceback(self):
         """
         update_or_create should raise IntegrityErrors with the full traceback.
-        This is tested by checking that a known method call is in the traceback.
-        We cannot use assertRaises/assertRaises here because we need to inspect
-        the actual traceback. Refs #16340.
+        This is tested by checking that a known method call is in the
+        traceback. We cannot use assertRaises/assertRaises here because we need
+        to inspect the actual traceback. Refs #16340.
         """
         try:
             ManualPrimaryKeyTest.objects.update_or_create(id=1, data="Different")
@@ -390,8 +389,14 @@ class UpdateOrCreateTests(TestCase):
         """
         p = Publisher.objects.create(name="Acme Publishing")
         book, created = p.books.update_or_create(name="The Book of Ed & Fred")
-        self.assertTrue(created)
+        self.assertIs(created, True)
         self.assertEqual(p.books.count(), 1)
+        book, created = p.books.update_or_create(
+            name="Basics of Django", create_defaults={"name": "Advanced Django"}
+        )
+        self.assertIs(created, True)
+        self.assertEqual(book.name, "Advanced Django")
+        self.assertEqual(p.books.count(), 2)
 
     def test_update_with_related_manager(self):
         """
@@ -405,6 +410,14 @@ class UpdateOrCreateTests(TestCase):
         book, created = p.books.update_or_create(defaults={"name": name}, id=book.id)
         self.assertFalse(created)
         self.assertEqual(book.name, name)
+        # create_defaults should be ignored.
+        book, created = p.books.update_or_create(
+            create_defaults={"name": "Basics of Django"},
+            defaults={"name": name},
+            id=book.id,
+        )
+        self.assertIs(created, False)
+        self.assertEqual(book.name, name)
         self.assertEqual(p.books.count(), 1)
 
     def test_create_with_many(self):
@@ -417,8 +430,16 @@ class UpdateOrCreateTests(TestCase):
         book, created = author.books.update_or_create(
             name="The Book of Ed & Fred", publisher=p
         )
-        self.assertTrue(created)
+        self.assertIs(created, True)
         self.assertEqual(author.books.count(), 1)
+        book, created = author.books.update_or_create(
+            name="Basics of Django",
+            publisher=p,
+            create_defaults={"name": "Advanced Django"},
+        )
+        self.assertIs(created, True)
+        self.assertEqual(book.name, "Advanced Django")
+        self.assertEqual(author.books.count(), 2)
 
     def test_update_with_many(self):
         """
@@ -435,6 +456,14 @@ class UpdateOrCreateTests(TestCase):
             defaults={"name": name}, id=book.id
         )
         self.assertFalse(created)
+        self.assertEqual(book.name, name)
+        # create_defaults should be ignored.
+        book, created = author.books.update_or_create(
+            create_defaults={"name": "Basics of Django"},
+            defaults={"name": name},
+            id=book.id,
+        )
+        self.assertIs(created, False)
         self.assertEqual(book.name, name)
         self.assertEqual(author.books.count(), 1)
 
@@ -466,11 +495,49 @@ class UpdateOrCreateTests(TestCase):
         self.assertFalse(created)
         self.assertEqual(obj.defaults, "another testing")
 
+    def test_create_defaults_exact(self):
+        """
+        If you have a field named create_defaults and want to use it as an
+        exact lookup, you need to use 'create_defaults__exact'.
+        """
+        obj, created = Person.objects.update_or_create(
+            first_name="George",
+            last_name="Harrison",
+            create_defaults__exact="testing",
+            create_defaults={
+                "birthday": date(1943, 2, 25),
+                "create_defaults": "testing",
+            },
+        )
+        self.assertIs(created, True)
+        self.assertEqual(obj.create_defaults, "testing")
+        obj, created = Person.objects.update_or_create(
+            first_name="George",
+            last_name="Harrison",
+            create_defaults__exact="testing",
+            create_defaults={
+                "birthday": date(1943, 2, 25),
+                "create_defaults": "another testing",
+            },
+        )
+        self.assertIs(created, False)
+        self.assertEqual(obj.create_defaults, "testing")
+
     def test_create_callable_default(self):
         obj, created = Person.objects.update_or_create(
             first_name="George",
             last_name="Harrison",
             defaults={"birthday": lambda: date(1943, 2, 25)},
+        )
+        self.assertIs(created, True)
+        self.assertEqual(obj.birthday, date(1943, 2, 25))
+
+    def test_create_callable_create_defaults(self):
+        obj, created = Person.objects.update_or_create(
+            first_name="George",
+            last_name="Harrison",
+            defaults={},
+            create_defaults={"birthday": lambda: date(1943, 2, 25)},
         )
         self.assertIs(created, True)
         self.assertEqual(obj.birthday, date(1943, 2, 25))
@@ -502,6 +569,40 @@ class UpdateOrCreateTests(TestCase):
             defaults=lazy(raise_exception, object)(),
         )
         self.assertFalse(created)
+
+    def test_mti_update_non_local_concrete_fields(self):
+        journalist = Journalist.objects.create(name="Jane", specialty="Politics")
+        journalist, created = Journalist.objects.update_or_create(
+            pk=journalist.pk,
+            defaults={"name": "John"},
+        )
+        self.assertIs(created, False)
+        self.assertEqual(journalist.name, "John")
+
+    def test_update_only_defaults_and_pre_save_fields_when_local_fields(self):
+        publisher = Publisher.objects.create(name="Acme Publishing")
+        book = Book.objects.create(publisher=publisher, name="The Book of Ed & Fred")
+
+        for defaults in [{"publisher": publisher}, {"publisher_id": publisher}]:
+            with self.subTest(defaults=defaults):
+                with CaptureQueriesContext(connection) as captured_queries:
+                    book, created = Book.objects.update_or_create(
+                        pk=book.pk,
+                        defaults=defaults,
+                    )
+                self.assertIs(created, False)
+                update_sqls = [
+                    q["sql"] for q in captured_queries if q["sql"].startswith("UPDATE")
+                ]
+                self.assertEqual(len(update_sqls), 1)
+                update_sql = update_sqls[0]
+                self.assertIsNotNone(update_sql)
+                self.assertIn(
+                    connection.ops.quote_name("publisher_id_column"), update_sql
+                )
+                self.assertIn(connection.ops.quote_name("updated"), update_sql)
+                # Name should not be updated.
+                self.assertNotIn(connection.ops.quote_name("name"), update_sql)
 
 
 class UpdateOrCreateTestsWithManualPKs(TestCase):
@@ -588,56 +689,75 @@ class UpdateOrCreateTransactionTests(TransactionTestCase):
         can update while it holds the lock. The updated field isn't a field in
         'defaults', so update_or_create() shouldn't have an effect on it.
         """
-        lock_status = {"lock_count": 0}
+        locked_for_update = Event()
+        save_allowed = Event()
 
-        def birthday_sleep():
-            lock_status["lock_count"] += 1
-            time.sleep(0.5)
+        def wait_or_fail(event, message):
+            if not event.wait(5):
+                raise AssertionError(message)
+
+        def birthday_yield():
+            # At this point the row should be locked as create or update
+            # defaults are only called once the SELECT FOR UPDATE is issued.
+            locked_for_update.set()
+            # Yield back the execution to the main thread until it allows
+            # save() to proceed.
+            save_allowed.clear()
             return date(1940, 10, 10)
 
-        def update_birthday_slowly():
+        person_save = Person.save
+
+        def wait_for_allowed_save(*args, **kwargs):
+            wait_or_fail(save_allowed, "Test took too long to allow save")
+            return person_save(*args, **kwargs)
+
+        def update_person():
             try:
-                Person.objects.update_or_create(
-                    first_name="John", defaults={"birthday": birthday_sleep}
-                )
+                with patch.object(Person, "save", wait_for_allowed_save):
+                    Person.objects.update_or_create(
+                        first_name="John",
+                        defaults={"last_name": "Doe", "birthday": birthday_yield},
+                    )
             finally:
-                # Avoid leaking connection for Oracle
+                # Avoid leaking connection for Oracle.
                 connection.close()
 
-        def lock_wait(expected_lock_count):
-            # timeout after ~0.5 seconds
-            for i in range(20):
-                time.sleep(0.025)
-                if lock_status["lock_count"] == expected_lock_count:
-                    return True
-            self.skipTest("Database took too long to lock the row")
-
-        # update_or_create in a separate thread.
-        t = Thread(target=update_birthday_slowly)
-        before_start = datetime.now()
+        t = Thread(target=update_person)
         t.start()
-        lock_wait(1)
+        wait_or_fail(locked_for_update, "Database took too long to lock row")
         # Create object *after* initial attempt by update_or_create to get obj
         # but before creation attempt.
-        Person.objects.create(
+        person = Person(
             first_name="John", last_name="Lennon", birthday=date(1940, 10, 9)
         )
-        lock_wait(2)
-        # At this point, the thread is pausing for 0.5 seconds, so now attempt
-        # to modify object before update_or_create() calls save(). This should
-        # be blocked until after the save().
+        # Don't use person.save() as it's gated by the save_allowed event.
+        person_save(person, force_insert=True)
+        # Now that the row is created allow the update_or_create() logic to
+        # attempt a save(force_insert) that will inevitably fail and wait
+        # until it yields back execution after performing a subsequent
+        # locked select for update with an intent to save(force_update).
+        locked_for_update.clear()
+        save_allowed.set()
+        wait_or_fail(locked_for_update, "Database took too long to lock row")
+        allow_save = Timer(0.5, save_allowed.set)
+        before_start = datetime.now()
+        allow_save.start()
+        # The following update() should block until the update_or_create()
+        # initiated save() is allowed to proceed by the `allow_save` timer
+        # setting `save_allowed` after 0.5 seconds.
         Person.objects.filter(first_name="John").update(last_name="NotLennon")
         after_update = datetime.now()
-        # Wait for thread to finish
+        # Wait for thread to finish.
         t.join()
         # Check call to update_or_create() succeeded and the subsequent
         # (blocked) call to update().
         updated_person = Person.objects.get(first_name="John")
-        self.assertEqual(
-            updated_person.birthday, date(1940, 10, 10)
-        )  # set by update_or_create()
-        self.assertEqual(updated_person.last_name, "NotLennon")  # set by update()
-        self.assertGreater(after_update - before_start, timedelta(seconds=1))
+        # Confirm update_or_create() performed an update.
+        self.assertEqual(updated_person.birthday, date(1940, 10, 10))
+        # Confirm update() was the last statement to run.
+        self.assertEqual(updated_person.last_name, "NotLennon")
+        # Confirm update() blocked at least the duration of the timer.
+        self.assertGreater(after_update - before_start, timedelta(seconds=0.5))
 
 
 class InvalidCreateArgumentsTests(TransactionTestCase):
@@ -658,6 +778,12 @@ class InvalidCreateArgumentsTests(TransactionTestCase):
     def test_update_or_create_with_invalid_defaults(self):
         with self.assertRaisesMessage(FieldError, self.msg):
             Thing.objects.update_or_create(name="a", defaults={"nonexistent": "b"})
+
+    def test_update_or_create_with_invalid_create_defaults(self):
+        with self.assertRaisesMessage(FieldError, self.msg):
+            Thing.objects.update_or_create(
+                name="a", create_defaults={"nonexistent": "b"}
+            )
 
     def test_update_or_create_with_invalid_kwargs(self):
         with self.assertRaisesMessage(FieldError, self.bad_field_msg):

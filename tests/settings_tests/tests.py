@@ -4,13 +4,7 @@ import unittest
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
-from django.conf import (
-    ENVIRONMENT_VARIABLE,
-    USE_DEPRECATED_PYTZ_DEPRECATED_MSG,
-    LazySettings,
-    Settings,
-    settings,
-)
+from django.conf import ENVIRONMENT_VARIABLE, LazySettings, Settings, settings
 from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest
 from django.test import (
@@ -23,7 +17,6 @@ from django.test import (
 )
 from django.test.utils import requires_tz_support
 from django.urls import clear_script_prefix, set_script_prefix
-from django.utils.deprecation import RemovedInDjango50Warning
 
 
 @modify_settings(ITEMS={"prepend": ["b"], "append": ["d"], "remove": ["a", "e"]})
@@ -31,7 +24,6 @@ from django.utils.deprecation import RemovedInDjango50Warning
     ITEMS=["a", "c", "e"], ITEMS_OUTER=[1, 2, 3], TEST="override", TEST_OUTER="outer"
 )
 class FullyDecoratedTranTestCase(TransactionTestCase):
-
     available_apps = []
 
     def test_override(self):
@@ -113,7 +105,7 @@ class FullyDecoratedTestCase(TestCase):
 class ClassDecoratedTestCaseSuper(TestCase):
     """
     Dummy class for testing max recursion error in child class call to
-    super().  Refs #17011.
+    super(). Refs #17011.
     """
 
     def test_max_recursion_error(self):
@@ -164,9 +156,7 @@ class SettingsTests(SimpleTestCase):
     def setUp(self):
         self.testvalue = None
         signals.setting_changed.connect(self.signal_callback)
-
-    def tearDown(self):
-        signals.setting_changed.disconnect(self.signal_callback)
+        self.addCleanup(signals.setting_changed.disconnect, self.signal_callback)
 
     def signal_callback(self, sender, setting, value, **kwargs):
         if setting == "TEST":
@@ -215,7 +205,8 @@ class SettingsTests(SimpleTestCase):
             getattr(settings, "TEST")
 
     def test_class_decorator(self):
-        # SimpleTestCase can be decorated by override_settings, but not ut.TestCase
+        # SimpleTestCase can be decorated by override_settings, but not
+        # ut.TestCase
         class SimpleTestCaseSubclass(SimpleTestCase):
             pass
 
@@ -348,40 +339,6 @@ class SettingsTests(SimpleTestCase):
         with self.assertRaisesMessage(ValueError, "Incorrect timezone setting: test"):
             settings._setup()
 
-    def test_use_tz_false_deprecation(self):
-        settings_module = ModuleType("fake_settings_module")
-        settings_module.SECRET_KEY = "foo"
-        sys.modules["fake_settings_module"] = settings_module
-        msg = (
-            "The default value of USE_TZ will change from False to True in "
-            "Django 5.0. Set USE_TZ to False in your project settings if you "
-            "want to keep the current default behavior."
-        )
-        try:
-            with self.assertRaisesMessage(RemovedInDjango50Warning, msg):
-                Settings("fake_settings_module")
-        finally:
-            del sys.modules["fake_settings_module"]
-
-    def test_use_deprecated_pytz_deprecation(self):
-        settings_module = ModuleType("fake_settings_module")
-        settings_module.USE_DEPRECATED_PYTZ = True
-        settings_module.USE_TZ = True
-        sys.modules["fake_settings_module"] = settings_module
-        try:
-            with self.assertRaisesMessage(
-                RemovedInDjango50Warning, USE_DEPRECATED_PYTZ_DEPRECATED_MSG
-            ):
-                Settings("fake_settings_module")
-        finally:
-            del sys.modules["fake_settings_module"]
-
-        holder = LazySettings()
-        with self.assertRaisesMessage(
-            RemovedInDjango50Warning, USE_DEPRECATED_PYTZ_DEPRECATED_MSG
-        ):
-            holder.configure(USE_DEPRECATED_PYTZ=True)
-
 
 class TestComplexSettingOverride(SimpleTestCase):
     def setUp(self):
@@ -511,7 +468,8 @@ class IsOverriddenTest(SimpleTestCase):
 class TestListSettings(SimpleTestCase):
     """
     Make sure settings that should be lists or tuples throw
-    ImproperlyConfigured if they are set to a string instead of a list or tuple.
+    ImproperlyConfigured if they are set to a string instead of a list or
+    tuple.
     """
 
     list_or_tuple_settings = (

@@ -1,9 +1,19 @@
+import inspect
 import threading
+import time
 from datetime import datetime, timedelta
 from unittest import mock
 
 from django.core.exceptions import MultipleObjectsReturned, ObjectDoesNotExist
-from django.db import DEFAULT_DB_ALIAS, DatabaseError, connections, models
+from django.db import (
+    DEFAULT_DB_ALIAS,
+    DatabaseError,
+    connection,
+    connections,
+    models,
+    transaction,
+)
+from django.db.models.functions import Now
 from django.db.models.manager import BaseManager
 from django.db.models.query import MAX_GET_RESULTS, EmptyQuerySet
 from django.test import (
@@ -12,6 +22,8 @@ from django.test import (
     TransactionTestCase,
     skipUnlessDBFeature,
 )
+from django.test.utils import CaptureQueriesContext
+from django.utils.connection import ConnectionDoesNotExist
 from django.utils.translation import gettext_lazy
 
 from .models import (
@@ -19,7 +31,10 @@ from .models import (
     ArticleSelectOnSave,
     ChildPrimaryKeyWithDefault,
     FeaturedArticle,
+    PrimaryKeyWithDbDefault,
     PrimaryKeyWithDefault,
+    PrimaryKeyWithFalseyDbDefault,
+    PrimaryKeyWithFalseyDefault,
     SelfRef,
 )
 
@@ -166,7 +181,8 @@ class ModelInstanceCreationTests(TestCase):
 
         # You can use 'in' to test for membership...
         self.assertIn(a, Article.objects.all())
-        # ... but there will often be more efficient ways if that is all you need:
+        # ... but there will often be more efficient ways if that is all you
+        # need:
         self.assertTrue(Article.objects.filter(id=a.id).exists())
 
     def test_save_primary_with_default(self):
@@ -174,11 +190,38 @@ class ModelInstanceCreationTests(TestCase):
         with self.assertNumQueries(1):
             PrimaryKeyWithDefault().save()
 
+    def test_save_primary_with_default_force_update(self):
+        # An UPDATE attempt is made if explicitly requested.
+        obj = PrimaryKeyWithDefault.objects.create()
+        with self.assertNumQueries(1):
+            PrimaryKeyWithDefault(uuid=obj.pk).save(force_update=True)
+
+    def test_save_primary_with_db_default(self):
+        # An UPDATE attempt is skipped when a primary key has db_default.
+        with self.assertNumQueries(1):
+            PrimaryKeyWithDbDefault().save()
+
     def test_save_parent_primary_with_default(self):
         # An UPDATE attempt is skipped when an inherited primary key has
         # default.
         with self.assertNumQueries(2):
             ChildPrimaryKeyWithDefault().save()
+
+    def test_save_primary_with_falsey_default(self):
+        with self.assertNumQueries(1):
+            PrimaryKeyWithFalseyDefault().save()
+
+    def test_save_primary_with_falsey_db_default(self):
+        with self.assertNumQueries(1):
+            PrimaryKeyWithFalseyDbDefault().save()
+
+    def test_auto_field_with_value_refreshed(self):
+        """
+        An auto field must be refreshed by Model.save() even when a value is
+        set because the database may return a value of a different type.
+        """
+        a = Article.objects.create(pk="123456", pub_date=datetime(2025, 9, 16))
+        self.assertEqual(a.pk, 123456)
 
 
 class ModelTest(TestCase):
@@ -198,7 +241,7 @@ class ModelTest(TestCase):
         some_pub_date = datetime(2014, 5, 16, 12, 1)
         for headline in headlines:
             Article(headline=headline, pub_date=some_pub_date).save()
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             Article.objects.order_by("headline"),
             sorted(headlines),
             transform=lambda a: a.headline,
@@ -246,6 +289,13 @@ class ModelTest(TestCase):
             pub_date=datetime(2005, 7, 31, 12, 30, 45),
         )
         self.assertEqual(Article.objects.get(headline="Article 10"), a10)
+
+    def test_create_method_propagates_fetch_mode(self):
+        article = Article.objects.fetch_mode(models.FETCH_PEERS).create(
+            headline="Article 10",
+            pub_date=datetime(2005, 7, 31, 12, 30, 45),
+        )
+        self.assertEqual(article._state.fetch_mode, models.FETCH_PEERS)
 
     def test_year_lookup_edge_case(self):
         # Edge-case test: A year lookup should retrieve all objects in
@@ -500,6 +550,51 @@ class ModelTest(TestCase):
             headline__startswith="Area",
         )
 
+    def test_is_pk_unset(self):
+        cases = [
+            Article(),
+            Article(id=None),
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                self.assertIs(case._is_pk_set(), False)
+
+    def test_is_pk_set(self):
+        def new_instance():
+            a = Article(pub_date=datetime.today())
+            a.save()
+            return a
+
+        cases = [
+            Article(id=1),
+            Article(id=0),
+            Article.objects.create(pub_date=datetime.today()),
+            new_instance(),
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                self.assertIs(case._is_pk_set(), True)
+
+    def test_save_expressions(self):
+        article = Article(pub_date=Now())
+        article.save()
+        expected_num_queries = (
+            0 if connection.features.can_return_columns_from_insert else 1
+        )
+        with self.assertNumQueries(expected_num_queries):
+            article_pub_date = article.pub_date
+        self.assertIsInstance(article_pub_date, datetime)
+        # Sleep slightly to ensure a different database level NOW().
+        time.sleep(0.1)
+        article.pub_date = Now()
+        article.save()
+        expected_num_queries = (
+            0 if connection.features.can_return_rows_from_update else 1
+        )
+        with self.assertNumQueries(expected_num_queries):
+            self.assertIsInstance(article.pub_date, datetime)
+        self.assertGreater(article.pub_date, article_pub_date)
+
 
 class ModelLookupTest(TestCase):
     @classmethod
@@ -627,7 +722,6 @@ class ModelLookupTest(TestCase):
 
 
 class ConcurrentSaveTests(TransactionTestCase):
-
     available_apps = ["basic"]
 
     @skipUnlessDBFeature("test_db_allows_multiple_connections")
@@ -720,6 +814,7 @@ class ManagerTest(SimpleTestCase):
         "alatest",
         "aupdate",
         "aupdate_or_create",
+        "fetch_mode",
     ]
 
     def test_manager_methods(self):
@@ -729,11 +824,23 @@ class ManagerTest(SimpleTestCase):
 
         It's particularly useful to prevent accidentally leaking new methods
         into `Manager`. New `QuerySet` methods that should also be copied onto
-        `Manager` will need to be added to `ManagerTest.QUERYSET_PROXY_METHODS`.
+        `Manager` will need to be added to
+        `ManagerTest.QUERYSET_PROXY_METHODS`.
         """
         self.assertEqual(
             sorted(BaseManager._get_queryset_methods(models.QuerySet)),
             sorted(self.QUERYSET_PROXY_METHODS),
+        )
+
+    def test_manager_method_attributes(self):
+        self.assertEqual(Article.objects.get.__doc__, models.QuerySet.get.__doc__)
+        self.assertEqual(Article.objects.count.__name__, models.QuerySet.count.__name__)
+
+    def test_manager_method_signature(self):
+        self.assertEqual(
+            str(inspect.signature(Article.objects.bulk_create)),
+            "(objs, batch_size=None, ignore_conflicts=False, update_conflicts=False, "
+            "update_fields=None, unique_fields=None)",
         )
 
 
@@ -793,8 +900,9 @@ class SelectOnSaveTests(TestCase):
                 "An error occurred in the current transaction. You can't "
                 "execute queries until the end of the 'atomic' block."
             )
-            with self.assertRaisesMessage(DatabaseError, msg):
+            with self.assertRaisesMessage(DatabaseError, msg) as cm:
                 asos.save(update_fields=["pub_date"])
+            self.assertIsInstance(cm.exception.__cause__, DatabaseError)
         finally:
             Article._base_manager._queryset_class = orig_class
 
@@ -894,6 +1002,13 @@ class ModelRefreshTests(TestCase):
         article.refresh_from_db()
         self.assertTrue(hasattr(article, "featured"))
 
+    def test_refresh_clears_reverse_related_explicit_fields(self):
+        article = Article.objects.create(headline="Test", pub_date=datetime(2024, 2, 4))
+        self.assertFalse(hasattr(article, "featured"))
+        FeaturedArticle.objects.create(article_id=article.pk)
+        article.refresh_from_db(fields=["featured"])
+        self.assertTrue(hasattr(article, "featured"))
+
     def test_refresh_clears_one_to_one_field(self):
         article = Article.objects.create(
             headline="Parrot programs in Python",
@@ -908,24 +1023,78 @@ class ModelRefreshTests(TestCase):
 
     def test_prefetched_cache_cleared(self):
         a = Article.objects.create(pub_date=datetime(2005, 7, 28))
-        s = SelfRef.objects.create(article=a)
+        s = SelfRef.objects.create(article=a, article_cited=a)
         # refresh_from_db() without fields=[...]
-        a1_prefetched = Article.objects.prefetch_related("selfref_set").first()
+        a1_prefetched = Article.objects.prefetch_related("selfref_set", "cited").first()
         self.assertCountEqual(a1_prefetched.selfref_set.all(), [s])
+        self.assertCountEqual(a1_prefetched.cited.all(), [s])
         s.article = None
+        s.article_cited = None
         s.save()
         # Relation is cleared and prefetch cache is stale.
         self.assertCountEqual(a1_prefetched.selfref_set.all(), [s])
+        self.assertCountEqual(a1_prefetched.cited.all(), [s])
         a1_prefetched.refresh_from_db()
         # Cache was cleared and new results are available.
         self.assertCountEqual(a1_prefetched.selfref_set.all(), [])
+        self.assertCountEqual(a1_prefetched.cited.all(), [])
         # refresh_from_db() with fields=[...]
-        a2_prefetched = Article.objects.prefetch_related("selfref_set").first()
+        a2_prefetched = Article.objects.prefetch_related("selfref_set", "cited").first()
         self.assertCountEqual(a2_prefetched.selfref_set.all(), [])
+        self.assertCountEqual(a2_prefetched.cited.all(), [])
         s.article = a
+        s.article_cited = a
         s.save()
         # Relation is added and prefetch cache is stale.
         self.assertCountEqual(a2_prefetched.selfref_set.all(), [])
-        a2_prefetched.refresh_from_db(fields=["selfref_set"])
+        self.assertCountEqual(a2_prefetched.cited.all(), [])
+        fields = ["selfref_set", "cited"]
+        a2_prefetched.refresh_from_db(fields=fields)
+        self.assertEqual(fields, ["selfref_set", "cited"])
         # Cache was cleared and new results are available.
         self.assertCountEqual(a2_prefetched.selfref_set.all(), [s])
+        self.assertCountEqual(a2_prefetched.cited.all(), [s])
+
+    @skipUnlessDBFeature("has_select_for_update")
+    def test_refresh_for_update(self):
+        a = Article.objects.create(pub_date=datetime.now())
+        for_update_sql = connection.ops.for_update_sql()
+
+        with transaction.atomic(), CaptureQueriesContext(connection) as ctx:
+            a.refresh_from_db(from_queryset=Article.objects.select_for_update())
+        self.assertTrue(
+            any(for_update_sql in query["sql"] for query in ctx.captured_queries)
+        )
+
+    def test_refresh_with_related(self):
+        a = Article.objects.create(pub_date=datetime.now())
+        fa = FeaturedArticle.objects.create(article=a)
+
+        from_queryset = FeaturedArticle.objects.select_related("article")
+        with self.assertNumQueries(1):
+            fa.refresh_from_db(from_queryset=from_queryset)
+            self.assertEqual(fa.article.pub_date, a.pub_date)
+        with self.assertNumQueries(2):
+            fa.refresh_from_db()
+            self.assertEqual(fa.article.pub_date, a.pub_date)
+
+    def test_refresh_overwrites_queryset_using(self):
+        a = Article.objects.create(pub_date=datetime.now())
+
+        from_queryset = Article.objects.using("nonexistent")
+        with self.assertRaises(ConnectionDoesNotExist):
+            a.refresh_from_db(from_queryset=from_queryset)
+        a.refresh_from_db(using="default", from_queryset=from_queryset)
+
+    def test_refresh_overwrites_queryset_fields(self):
+        a = Article.objects.create(pub_date=datetime.now())
+        headline = "headline"
+        Article.objects.filter(pk=a.pk).update(headline=headline)
+
+        from_queryset = Article.objects.only("pub_date")
+        with self.assertNumQueries(1):
+            a.refresh_from_db(from_queryset=from_queryset)
+            self.assertNotEqual(a.headline, headline)
+        with self.assertNumQueries(1):
+            a.refresh_from_db(fields=["headline"], from_queryset=from_queryset)
+            self.assertEqual(a.headline, headline)

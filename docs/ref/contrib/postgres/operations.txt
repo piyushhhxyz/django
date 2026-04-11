@@ -22,13 +22,11 @@ For example::
 
     from django.contrib.postgres.operations import HStoreExtension
 
+
     class Migration(migrations.Migration):
         ...
 
-        operations = [
-            HStoreExtension(),
-            ...
-        ]
+        operations = [HStoreExtension(), ...]
 
 The operation skips adding the extension if it already exists.
 
@@ -43,7 +41,7 @@ them. In that case, connect to your Django database and run the query
 ``CreateExtension``
 ===================
 
-.. class:: CreateExtension(name)
+.. class:: CreateExtension(name, hints=None)
 
     An ``Operation`` subclass which installs a PostgreSQL extension. For common
     extensions, use one of the more specific subclasses below.
@@ -52,62 +50,134 @@ them. In that case, connect to your Django database and run the query
 
         This is a required argument. The name of the extension to be installed.
 
+    .. attribute:: hints
+
+        .. versionadded:: 6.0
+
+        The optional ``hints`` argument will be passed as ``**hints`` to the
+        :meth:`allow_migrate` method of database routers to assist them in
+        :ref:`making routing decisions <topics-db-multi-db-hints>`.
+
 ``BloomExtension``
 ==================
 
-.. class:: BloomExtension()
+.. class:: BloomExtension(hints=None)
 
     Installs the ``bloom`` extension.
+
+    .. attribute:: hints
+
+        .. versionadded:: 6.0
+
+        The optional ``hints`` argument will be passed as ``**hints`` to the
+        :meth:`allow_migrate` method of database routers to assist them in
+        :ref:`making routing decisions <topics-db-multi-db-hints>`.
 
 ``BtreeGinExtension``
 =====================
 
-.. class:: BtreeGinExtension()
+.. class:: BtreeGinExtension(hints=None)
 
     Installs the ``btree_gin`` extension.
+
+    .. attribute:: hints
+
+        .. versionadded:: 6.0
+
+        The optional ``hints`` argument will be passed as ``**hints`` to the
+        :meth:`allow_migrate` method of database routers to assist them in
+        :ref:`making routing decisions <topics-db-multi-db-hints>`.
 
 ``BtreeGistExtension``
 ======================
 
-.. class:: BtreeGistExtension()
+.. class:: BtreeGistExtension(hints=None)
 
     Installs the ``btree_gist`` extension.
+
+    .. attribute:: hints
+
+        .. versionadded:: 6.0
+
+        The optional ``hints`` argument will be passed as ``**hints`` to the
+        :meth:`allow_migrate` method of database routers to assist them in
+        :ref:`making routing decisions <topics-db-multi-db-hints>`.
 
 ``CITextExtension``
 ===================
 
-.. class:: CITextExtension()
+.. class:: CITextExtension(hints=None)
 
     Installs the ``citext`` extension.
+
+    .. attribute:: hints
+
+        .. versionadded:: 6.0
+
+        The optional ``hints`` argument will be passed as ``**hints`` to the
+        :meth:`allow_migrate` method of database routers to assist them in
+        :ref:`making routing decisions <topics-db-multi-db-hints>`.
 
 ``CryptoExtension``
 ===================
 
-.. class:: CryptoExtension()
+.. class:: CryptoExtension(hints=None)
 
     Installs the ``pgcrypto`` extension.
+
+    .. attribute:: hints
+
+        .. versionadded:: 6.0
+
+        The optional ``hints`` argument will be passed as ``**hints`` to the
+        :meth:`allow_migrate` method of database routers to assist them in
+        :ref:`making routing decisions <topics-db-multi-db-hints>`.
 
 ``HStoreExtension``
 ===================
 
-.. class:: HStoreExtension()
+.. class:: HStoreExtension(hints=None)
 
     Installs the ``hstore`` extension and also sets up the connection to
     interpret hstore data for possible use in subsequent migrations.
 
+    .. attribute:: hints
+
+        .. versionadded:: 6.0
+
+        The optional ``hints`` argument will be passed as ``**hints`` to the
+        :meth:`allow_migrate` method of database routers to assist them in
+        :ref:`making routing decisions <topics-db-multi-db-hints>`.
+
 ``TrigramExtension``
 ====================
 
-.. class:: TrigramExtension()
+.. class:: TrigramExtension(hints=None)
 
     Installs the ``pg_trgm`` extension.
+
+    .. attribute:: hints
+
+        .. versionadded:: 6.0
+
+        The optional ``hints`` argument will be passed as ``**hints`` to the
+        :meth:`allow_migrate` method of database routers to assist them in
+        :ref:`making routing decisions <topics-db-multi-db-hints>`.
 
 ``UnaccentExtension``
 =====================
 
-.. class:: UnaccentExtension()
+.. class:: UnaccentExtension(hints=None)
 
     Installs the ``unaccent`` extension.
+
+    .. attribute:: hints
+
+        .. versionadded:: 6.0
+
+        The optional ``hints`` argument will be passed as ``**hints`` to the
+        :meth:`allow_migrate` method of database routers to assist them in
+        :ref:`making routing decisions <topics-db-multi-db-hints>`.
 
 .. _manage-postgresql-collations:
 
@@ -124,16 +194,18 @@ For example, to create a collation for German phone book ordering::
 
     from django.contrib.postgres.operations import CreateCollation
 
+
     class Migration(migrations.Migration):
         ...
 
         operations = [
             CreateCollation(
-                'german_phonebook',
-                provider='icu',
-                locale='und-u-ks-level2',
+                "case_insensitive",
+                provider="icu",
+                locale="und-u-ks-level2",
+                deterministic=False,
             ),
-            ...
+            ...,
         ]
 
 .. class:: CreateCollation(name, locale, *, provider='libc', deterministic=True)
@@ -150,10 +222,6 @@ For example, to create a collation for German phone book ordering::
     When reversed this is creating a collation with the provided ``locale``,
     ``provider``, and ``deterministic`` arguments. Therefore, ``locale`` is
     required to make this operation reversible.
-
-.. admonition:: Restrictions
-
-    Non-deterministic collations are supported only on PostgreSQL 12+.
 
 Concurrent index operations
 ===========================
@@ -185,8 +253,6 @@ database.
 
 Adding constraints without enforcing validation
 ===============================================
-
-.. versionadded:: 4.0
 
 PostgreSQL supports the ``NOT VALID`` option with the ``ADD CONSTRAINT``
 statement to add check constraints without enforcing validation on existing

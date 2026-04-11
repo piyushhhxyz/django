@@ -5,6 +5,7 @@ import warnings
 from asgiref.local import Local
 
 from django.apps import apps
+from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.signals import setting_changed
 from django.db import connections, router
@@ -13,6 +14,7 @@ from django.dispatch import Signal, receiver
 from django.utils import timezone
 from django.utils.formats import FORMAT_SETTINGS, reset_format_cache
 from django.utils.functional import empty
+from django.utils.log import configure_logging
 
 template_rendered = Signal()
 
@@ -112,6 +114,27 @@ def reset_template_engines(*, setting, **kwargs):
 
 
 @receiver(setting_changed)
+def storages_changed(*, setting, **kwargs):
+    from django.contrib.staticfiles.storage import staticfiles_storage
+    from django.core.files.storage import default_storage, storages
+
+    if setting in (
+        "STORAGES",
+        "STATIC_ROOT",
+        "STATIC_URL",
+    ):
+        try:
+            del storages.backends
+        except AttributeError:
+            pass
+        storages._backends = None
+        storages._storages = {}
+
+        default_storage._wrapped = empty
+        staticfiles_storage._wrapped = empty
+
+
+@receiver(setting_changed)
 def clear_serializers_cache(*, setting, **kwargs):
     if setting == "SERIALIZATION_MODULES":
         from django.core import serializers
@@ -140,21 +163,13 @@ def localize_settings_changed(*, setting, **kwargs):
 
 
 @receiver(setting_changed)
-def file_storage_changed(*, setting, **kwargs):
-    if setting == "DEFAULT_FILE_STORAGE":
-        from django.core.files.storage import default_storage
-
-        default_storage._wrapped = empty
-
-
-@receiver(setting_changed)
 def complex_setting_changed(*, enter, setting, **kwargs):
     if enter and setting in COMPLEX_OVERRIDE_SETTINGS:
         # Considering the current implementation of the signals framework,
         # this stacklevel shows the line containing the override_settings call.
         warnings.warn(
             f"Overriding setting {setting} can lead to unexpected behavior.",
-            stacklevel=6,
+            stacklevel=5,
         )
 
 
@@ -170,7 +185,6 @@ def root_urlconf_changed(*, setting, **kwargs):
 @receiver(setting_changed)
 def static_storage_changed(*, setting, **kwargs):
     if setting in {
-        "STATICFILES_STORAGE",
         "STATIC_ROOT",
         "STATIC_URL",
     }:
@@ -188,6 +202,14 @@ def static_finders_changed(*, setting, **kwargs):
         from django.contrib.staticfiles.finders import get_finder
 
         get_finder.cache_clear()
+
+
+@receiver(setting_changed)
+def form_renderer_changed(*, setting, **kwargs):
+    if setting == "FORM_RENDERER":
+        from django.forms.renderers import get_default_renderer
+
+        get_default_renderer.cache_clear()
 
 
 @receiver(setting_changed)
@@ -231,3 +253,9 @@ def user_model_swapped(*, setting, **kwargs):
             from django.contrib.auth import views
 
             views.UserModel = UserModel
+
+
+@receiver(setting_changed)
+def update_logging_config(*, setting, **kwargs):
+    if setting in {"LOGGING", "LOGGING_CONFIG"}:
+        configure_logging(settings.LOGGING_CONFIG, settings.LOGGING)

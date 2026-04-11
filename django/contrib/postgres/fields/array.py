@@ -2,6 +2,10 @@ import json
 
 from django.contrib.postgres import lookups
 from django.contrib.postgres.forms import SimpleArrayField
+from django.contrib.postgres.utils import (
+    CheckPostgresInstalledMixin,
+    prefix_validation_error,
+)
 from django.contrib.postgres.validators import ArrayMaxLengthValidator
 from django.core import checks, exceptions
 from django.db.models import Field, Func, IntegerField, Transform, Value
@@ -9,13 +13,12 @@ from django.db.models.fields.mixins import CheckFieldDefaultMixin
 from django.db.models.lookups import Exact, In
 from django.utils.translation import gettext_lazy as _
 
-from ..utils import prefix_validation_error
 from .utils import AttributeSetter
 
 __all__ = ["ArrayField"]
 
 
-class ArrayField(CheckFieldDefaultMixin, Field):
+class ArrayField(CheckPostgresInstalledMixin, CheckFieldDefaultMixin, Field):
     empty_strings_allowed = False
     default_error_messages = {
         "item_invalid": _("Item %(nth)s in the array did not validate:"),
@@ -25,6 +28,7 @@ class ArrayField(CheckFieldDefaultMixin, Field):
 
     def __init__(self, base_field, size=None, **kwargs):
         self.base_field = base_field
+        self.db_collation = getattr(self.base_field, "db_collation", None)
         self.size = size
         if self.size:
             self.default_validators = [
@@ -66,19 +70,37 @@ class ArrayField(CheckFieldDefaultMixin, Field):
                 )
             )
         else:
-            # Remove the field name checks as they are not needed here.
-            base_errors = self.base_field.check()
-            if base_errors:
-                messages = "\n    ".join(
-                    "%s (%s)" % (error.msg, error.id) for error in base_errors
+            base_checks = self.base_field.check(**kwargs)
+            if base_checks:
+                error_messages = "\n    ".join(
+                    "%s (%s)" % (base_check.msg, base_check.id)
+                    for base_check in base_checks
+                    if isinstance(base_check, checks.Error)
+                    # Prevent duplication of E005 in an E001 check.
+                    and not base_check.id == "postgres.E005"
                 )
-                errors.append(
-                    checks.Error(
-                        "Base field for array has errors:\n    %s" % messages,
-                        obj=self,
-                        id="postgres.E001",
+                if error_messages:
+                    errors.append(
+                        checks.Error(
+                            "Base field for array has errors:\n    %s" % error_messages,
+                            obj=self,
+                            id="postgres.E001",
+                        )
                     )
+                warning_messages = "\n    ".join(
+                    "%s (%s)" % (base_check.msg, base_check.id)
+                    for base_check in base_checks
+                    if isinstance(base_check, checks.Warning)
                 )
+                if warning_messages:
+                    errors.append(
+                        checks.Warning(
+                            "Base field for array has warnings:\n    %s"
+                            % warning_messages,
+                            obj=self,
+                            id="postgres.W004",
+                        )
+                    )
         return errors
 
     def set_attributes_from_name(self, name):
@@ -97,8 +119,17 @@ class ArrayField(CheckFieldDefaultMixin, Field):
         size = self.size or ""
         return "%s[%s]" % (self.base_field.cast_db_type(connection), size)
 
-    def get_placeholder(self, value, compiler, connection):
-        return "%s::{}".format(self.db_type(connection))
+    def db_parameters(self, connection):
+        db_params = super().db_parameters(connection)
+        db_params["collation"] = self.db_collation
+        return db_params
+
+    def get_placeholder_sql(self, value, compiler, connection):
+        db_type = self.db_type(connection)
+        if hasattr(value, "as_sql"):
+            sql, params = compiler.compile(value)
+            return f"{sql}::{db_type}", params
+        return f"%s::{db_type}", (value,)
 
     def get_db_prep_value(self, value, connection, prepared=False):
         if isinstance(value, (list, tuple)):
@@ -108,16 +139,18 @@ class ArrayField(CheckFieldDefaultMixin, Field):
             ]
         return value
 
+    def get_db_prep_save(self, value, connection):
+        if isinstance(value, (list, tuple)):
+            return [self.base_field.get_db_prep_save(i, connection) for i in value]
+        return value
+
     def deconstruct(self):
         name, path, args, kwargs = super().deconstruct()
         if path == "django.contrib.postgres.fields.array.ArrayField":
             path = "django.contrib.postgres.fields.ArrayField"
-        kwargs.update(
-            {
-                "base_field": self.base_field.clone(),
-                "size": self.size,
-            }
-        )
+        kwargs["base_field"] = self.base_field.clone()
+        if self.size is not None:
+            kwargs["size"] = self.size
         return name, path, args, kwargs
 
     def to_python(self, value):
@@ -146,7 +179,7 @@ class ArrayField(CheckFieldDefaultMixin, Field):
             else:
                 obj = AttributeSetter(base_field.attname, val)
                 values.append(base_field.value_to_string(obj))
-        return json.dumps(values)
+        return json.dumps(values, ensure_ascii=False)
 
     def get_transform(self, name):
         transform = super().get_transform(name)
@@ -211,10 +244,18 @@ class ArrayField(CheckFieldDefaultMixin, Field):
             }
         )
 
+    def slice_expression(self, expression, start, length):
+        # If length is not provided, don't specify an end to slice to the end
+        # of the array.
+        end = None if length is None else start + length - 1
+        return SliceTransform(start, end, expression)
+
 
 class ArrayRHSMixin:
     def __init__(self, lhs, rhs):
-        if isinstance(rhs, (tuple, list)):
+        # Don't wrap arrays that contains only None values, psycopg doesn't
+        # allow this.
+        if isinstance(rhs, (tuple, list)) and any(self._rhs_not_none_values(rhs)):
             expressions = []
             for value in rhs:
                 if not hasattr(value, "resolve_expression"):
@@ -232,6 +273,13 @@ class ArrayRHSMixin:
         rhs, rhs_params = super().process_rhs(compiler, connection)
         cast_type = self.lhs.output_field.cast_db_type(connection)
         return "%s::%s" % (rhs, cast_type), rhs_params
+
+    def _rhs_not_none_values(self, rhs):
+        for x in rhs:
+            if isinstance(x, (list, tuple)):
+                yield from self._rhs_not_none_values(x)
+            elif x is not None:
+                yield True
 
 
 @ArrayField.register_lookup
@@ -265,7 +313,7 @@ class ArrayLenTransform(Transform):
         return (
             "CASE WHEN %(lhs)s IS NULL THEN NULL ELSE "
             "coalesce(array_length(%(lhs)s, 1), 0) END"
-        ) % {"lhs": lhs}, params
+        ) % {"lhs": lhs}, params * 2
 
 
 @ArrayField.register_lookup
@@ -293,7 +341,9 @@ class IndexTransform(Transform):
 
     def as_sql(self, compiler, connection):
         lhs, params = compiler.compile(self.lhs)
-        return "%s[%%s]" % lhs, params + [self.index]
+        if not lhs.endswith("]"):
+            lhs = "(%s)" % lhs
+        return "%s[%%s]" % lhs, (*params, self.index)
 
     @property
     def output_field(self):
@@ -317,7 +367,11 @@ class SliceTransform(Transform):
 
     def as_sql(self, compiler, connection):
         lhs, params = compiler.compile(self.lhs)
-        return "%s[%%s:%%s]" % lhs, params + [self.start, self.end]
+        # self.start is set to 1 if slice start is not provided.
+        if self.end is None:
+            return f"({lhs})[%s:]", (*params, self.start)
+        else:
+            return f"({lhs})[%s:%s]", (*params, self.start, self.end)
 
 
 class SliceTransformFactory:

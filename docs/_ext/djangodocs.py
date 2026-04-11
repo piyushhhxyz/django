@@ -1,6 +1,7 @@
 """
 Sphinx plugins for Django documentation.
 """
+
 import json
 import os
 import re
@@ -82,9 +83,7 @@ class VersionDirective(Directive):
         if len(self.arguments) > 1:
             msg = """Only one argument accepted for directive '{directive_name}::'.
             Comments should be provided as content,
-            not as an extra argument.""".format(
-                directive_name=self.name
-            )
+            not as an extra argument.""".format(directive_name=self.name)
             raise self.error(msg)
 
         env = self.state.document.settings.env
@@ -118,26 +117,33 @@ class DjangoHTMLTranslator(HTMLTranslator):
         self.context.append(self.compact_p)
         self.compact_p = True
         # Needed by Sphinx.
-        if sphinx_version >= (4, 3):
-            self._table_row_indices.append(0)
-        else:
-            self._table_row_index = 0
+        self._table_row_indices.append(0)
         self.body.append(self.starttag(node, "table", CLASS="docutils"))
 
     def depart_table(self, node):
         self.compact_p = self.context.pop()
-        if sphinx_version >= (4, 3):
-            self._table_row_indices.pop()
+        self._table_row_indices.pop()
         self.body.append("</table>\n")
 
     def visit_desc_parameterlist(self, node):
         self.body.append("(")  # by default sphinx puts <big> around the "("
-        self.first_param = 1
         self.optional_param_level = 0
         self.param_separator = node.child_text_separator
-        self.required_params_left = sum(
+        # Counts 'parameter groups' being either a required parameter, or a set
+        # of contiguous optional ones.
+        required_params = [
             isinstance(c, addnodes.desc_parameter) for c in node.children
-        )
+        ]
+        # How many required parameters are left.
+        self.required_params_left = sum(required_params)
+        if sphinx_version < (7, 1):
+            self.first_param = 1
+        else:
+            self.is_first_param = True
+            self.params_left_at_level = 0
+            self.param_group_index = 0
+            self.list_is_required_param = required_params
+            self.multi_line_parameter_list = False
 
     def depart_desc_parameterlist(self, node):
         self.body.append(")")
@@ -247,17 +253,14 @@ def visit_console_html(self, node):
         # has been used on it.
         self.document._console_directive_used_flag = True
         uid = node["uid"]
-        self.body.append(
-            """\
+        self.body.append("""\
 <div class="console-block" id="console-block-%(id)s">
 <input class="c-tab-unix" id="c-tab-%(id)s-unix" type="radio" name="console-%(id)s" \
 checked>
 <label for="c-tab-%(id)s-unix" title="Linux/macOS">&#xf17c/&#xf179</label>
 <input class="c-tab-win" id="c-tab-%(id)s-win" type="radio" name="console-%(id)s">
 <label for="c-tab-%(id)s-win" title="Windows">&#xf17a</label>
-<section class="c-content-unix" id="c-content-%(id)s-unix">\n"""
-            % {"id": uid}
-        )
+<section class="c-content-unix" id="c-content-%(id)s-unix">\n""" % {"id": uid})
         try:
             self.visit_literal_block(node)
         except nodes.SkipNode:

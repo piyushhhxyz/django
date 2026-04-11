@@ -1,4 +1,3 @@
-import functools
 import itertools
 import logging
 import os
@@ -10,6 +9,7 @@ import time
 import traceback
 import weakref
 from collections import defaultdict
+from functools import lru_cache, wraps
 from pathlib import Path
 from types import ModuleType
 from zipimport import zipimporter
@@ -33,6 +33,8 @@ logger = logging.getLogger("django.utils.autoreload")
 # file paths to allow watching them in the future.
 _error_files = []
 _exception = None
+# Exception raised while loading the URLConf.
+_url_module_exception = None
 
 try:
     import termios
@@ -57,12 +59,12 @@ def is_django_path(path):
 
 
 def check_errors(fn):
-    @functools.wraps(fn)
+    @wraps(fn)
     def wrapper(*args, **kwargs):
         global _exception
         try:
             fn(*args, **kwargs)
-        except Exception:
+        except Exception as e:
             _exception = sys.exc_info()
 
             et, ev, tb = _exception
@@ -75,14 +77,15 @@ def check_errors(fn):
 
             if filename not in _error_files:
                 _error_files.append(filename)
+            if _url_module_exception is not None:
+                raise e from _url_module_exception
 
-            raise
+            raise e
 
     return wrapper
 
 
 def raise_last_exception():
-    global _exception
     if _exception is not None:
         raise _exception[1]
 
@@ -120,7 +123,7 @@ def iter_all_python_module_files():
     return iter_modules_and_files(modules, frozenset(_error_files))
 
 
-@functools.lru_cache(maxsize=1)
+@lru_cache(maxsize=1)
 def iter_modules_and_files(modules, extra_files):
     """Iterate through all modules needed to be watched."""
     sys_file_paths = []
@@ -170,7 +173,7 @@ def iter_modules_and_files(modules, extra_files):
     return frozenset(results)
 
 
-@functools.lru_cache(maxsize=1)
+@lru_cache(maxsize=1)
 def common_roots(paths):
     """
     Return a tuple of common roots that are shared between the given paths.
@@ -194,7 +197,7 @@ def common_roots(paths):
     # Turn the tree into a list of Path instances.
     def _walk(node, path):
         for prefix, child in node.items():
-            yield from _walk(child, path + (prefix,))
+            yield from _walk(child, [*path, prefix])
         if not node:
             yield Path(*path)
 
@@ -227,9 +230,10 @@ def get_child_arguments():
     import __main__
 
     py_script = Path(sys.argv[0])
+    exe_entrypoint = py_script.with_suffix(".exe")
 
     args = [sys.executable] + ["-W%s" % o for o in sys.warnoptions]
-    if sys.implementation.name == "cpython":
+    if sys.implementation.name in ("cpython", "pypy"):
         args.extend(
             f"-X{key}" if value is True else f"-X{key}={value}"
             for key, value in sys._xoptions.items()
@@ -237,7 +241,7 @@ def get_child_arguments():
     # __spec__ is set when the server was started with the `-m` option,
     # see https://docs.python.org/3/reference/import.html#main-spec
     # __spec__ may not exist, e.g. when running in a Conda env.
-    if getattr(__main__, "__spec__", None) is not None:
+    if getattr(__main__, "__spec__", None) is not None and not exe_entrypoint.exists():
         spec = __main__.__spec__
         if (spec.name == "__main__" or spec.name.endswith(".__main__")) and spec.parent:
             name = spec.parent
@@ -248,7 +252,6 @@ def get_child_arguments():
     elif not py_script.exists():
         # sys.argv[0] may not exist for several reasons on Windows.
         # It may exist with a .exe extension or have a -script.py suffix.
-        exe_entrypoint = py_script.with_suffix(".exe")
         if exe_entrypoint.exists():
             # Should be executed directly, ignoring sys.executable.
             return [exe_entrypoint, *sys.argv[1:]]
@@ -269,6 +272,19 @@ def trigger_reload(filename):
 
 def restart_with_reloader():
     new_environ = {**os.environ, DJANGO_AUTORELOAD_ENV: "true"}
+    orig = getattr(sys, "orig_argv", ())
+    if any(
+        (arg == "-u")
+        or (
+            arg.startswith("-")
+            and not arg.startswith(("--", "-X", "-W"))
+            and len(arg) > 2
+            and arg[1:].isalpha()
+            and "u" in arg
+        )
+        for arg in orig[1:]
+    ):
+        new_environ.setdefault("PYTHONUNBUFFERED", "1")
     args = get_child_arguments()
     while True:
         p = subprocess.run(args, env=new_environ, close_fds=False)
@@ -327,6 +343,7 @@ class BaseReloader:
             return False
 
     def run(self, django_main_thread):
+        global _url_module_exception
         logger.debug("Waiting for apps ready_event.")
         self.wait_for_apps_ready(apps, django_main_thread)
         from django.urls import get_resolver
@@ -335,10 +352,10 @@ class BaseReloader:
         # reloader starts by accessing the urlconf_module property.
         try:
             get_resolver().urlconf_module
-        except Exception:
+        except Exception as e:
             # Loading the urlconf can result in errors during development.
-            # If this occurs then swallow the error and continue.
-            pass
+            # If this occurs then store the error and continue.
+            _url_module_exception = e
         logger.debug("Apps ready_event triggered. Sending autoreload_started signal.")
         autoreload_started.send(sender=self)
         self.run_loop()
@@ -463,14 +480,15 @@ class WatchmanReloader(BaseReloader):
         logger.debug("Watchman watch-project result: %s", result)
         return result["watch"], result.get("relative_path")
 
-    @functools.lru_cache
+    @lru_cache
     def _get_clock(self, root):
         return self.client.query("clock", root)["clock"]
 
     def _subscribe(self, directory, name, expression):
         root, rel_path = self._watch_root(directory)
-        # Only receive notifications of files changing, filtering out other types
-        # like special files: https://facebook.github.io/watchman/docs/type
+        # Only receive notifications of files changing, filtering out other
+        # types like special files:
+        # https://facebook.github.io/watchman/docs/type
         only_files_expression = [
             "allof",
             ["anyof", ["type", "f"], ["type", "l"]],
@@ -657,16 +675,7 @@ def start_django(reloader, main_func, *args, **kwargs):
     django_main_thread.start()
 
     while not reloader.should_stop:
-        try:
-            reloader.run(django_main_thread)
-        except WatchmanUnavailable as ex:
-            # It's possible that the watchman service shuts down or otherwise
-            # becomes unavailable. In that case, use the StatReloader.
-            reloader = StatReloader()
-            logger.error("Error connecting to Watchman: %s", ex)
-            logger.info(
-                "Watching for file changes with %s", reloader.__class__.__name__
-            )
+        reloader.run(django_main_thread)
 
 
 def run_with_reloader(main_func, *args, **kwargs):

@@ -1,11 +1,16 @@
 import sys
+import unittest
+from typing import TYPE_CHECKING
 
 from django.template import Context, Engine, TemplateDoesNotExist, TemplateSyntaxError
 from django.template.base import UNKNOWN_SOURCE
 from django.test import SimpleTestCase, override_settings
 from django.urls import NoReverseMatch
 from django.utils import translation
-from django.utils.html import escape
+from django.utils.version import PY314
+
+if TYPE_CHECKING:
+    type AnnotatedKwarg = str
 
 
 class TemplateTestMixin:
@@ -31,7 +36,7 @@ class TemplateTestMixin:
 
     def test_url_reverse_view_name(self):
         """
-        #19827 -- url tag should keep original strack trace when reraising
+        #19827 -- url tag should keep original stack trace when reraising
         exception.
         """
         t = self._engine().from_string("{% url will_not_match %}")
@@ -140,6 +145,15 @@ class TemplateTestMixin:
         if self.debug_engine:
             self.assertEqual(e.exception.template_debug["during"], "{% badtag %}")
 
+    def test_compile_tag_extra_data(self):
+        """Custom tags can pass extra data back to template."""
+        engine = self._engine(
+            app_dirs=True,
+            libraries={"custom": "template_tests.templatetags.custom"},
+        )
+        t = engine.from_string("{% load custom %}{% extra_data %}")
+        self.assertEqual(t.extra_data["extra_data"], "CUSTOM_DATA")
+
     def test_render_tag_error_in_extended_block(self):
         """Errors in extended block are displayed correctly."""
         e = self._engine(app_dirs=True)
@@ -149,9 +163,31 @@ class TemplateTestMixin:
             template.render(context)
         if self.debug_engine:
             self.assertEqual(
-                cm.exception.template_debug["during"],
-                escape('{% include "missing.html" %}'),
+                cm.exception.template_debug["before"],
+                '{% block content %}{% include "index.html" %}',
             )
+            self.assertEqual(
+                cm.exception.template_debug["during"],
+                '{% include "missing.html" %}',
+            )
+            self.assertEqual(
+                cm.exception.template_debug["after"],
+                '{% include "index.html" %}{% endblock %}\n',
+            )
+            self.assertEqual(
+                cm.exception.template_debug["source_lines"][0],
+                (1, '{% extends "test_extends_block_error_parent.html" %}\n'),
+            )
+            self.assertEqual(
+                cm.exception.template_debug["source_lines"][1],
+                (
+                    2,
+                    '{% block content %}{% include "index.html" %}'
+                    '{% include "missing.html" %}'
+                    '{% include "index.html" %}{% endblock %}\n',
+                ),
+            )
+            self.assertEqual(cm.exception.template_debug["source_lines"][2], (3, ""))
 
     def test_super_errors(self):
         """
@@ -182,6 +218,29 @@ class TemplateTestMixin:
         template = self._engine().from_string("content")
         for node in template.nodelist:
             self.assertEqual(node.origin, template.origin)
+
+    def test_render_built_in_type_method(self):
+        """
+        Templates should not crash when rendering methods for built-in types
+        without required arguments.
+        """
+        template = self._engine().from_string("{{ description.count }}")
+        self.assertEqual(template.render(Context({"description": "test"})), "")
+
+    @unittest.skipUnless(PY314, "Deferred annotations are Python 3.14+ only")
+    def test_callable_uses_deferred_annotations(self):
+        """
+        Missing required arguments are gracefully handled when a signature uses
+        deferred annotations.
+        """
+
+        class MyObject:
+            @staticmethod
+            def uses_deferred_annotations(value: AnnotatedKwarg):
+                return value
+
+        template = self._engine().from_string("{{ obj.uses_deferred_annotations }}")
+        self.assertEqual(template.render(Context({"obj": MyObject()})), "")
 
 
 class TemplateTests(TemplateTestMixin, SimpleTestCase):

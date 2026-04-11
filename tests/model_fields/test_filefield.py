@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from django.core.exceptions import SuspiciousFileOperation
+from django.core.exceptions import FieldError, SuspiciousFileOperation
 from django.core.files import File, temp
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import TemporaryUploadedFile
@@ -13,7 +13,7 @@ from django.db import IntegrityError, models
 from django.test import TestCase, override_settings
 from django.test.utils import isolate_apps
 
-from .models import Document
+from .models import Document, DocumentWithTimestamp
 
 
 class FileFieldTests(TestCase):
@@ -72,6 +72,26 @@ class FileFieldTests(TestCase):
             with self.assertRaisesMessage(SuspiciousFileOperation, msg):
                 document.save()
 
+    def test_save_content_file_without_name(self):
+        d = Document()
+        d.myfile = ContentFile(b"")
+        msg = "File for myfile must have the name attribute specified to be saved."
+        with self.assertRaisesMessage(FieldError, msg) as cm:
+            d.save()
+
+        self.assertEqual(
+            cm.exception.__notes__, ["Pass a 'name' argument to ContentFile."]
+        )
+
+    def test_delete_content_file(self):
+        file = ContentFile(b"", name="foo")
+        d = Document.objects.create(myfile=file)
+        d.myfile.delete()
+        self.assertIsNone(d.myfile.name)
+        msg = "The 'myfile' attribute has no file associated with it."
+        with self.assertRaisesMessage(ValueError, msg):
+            getattr(d.myfile, "file")
+
     def test_defer(self):
         Document.objects.create(myfile="something.txt")
         self.assertEqual(Document.objects.defer("myfile")[0].myfile, "something.txt")
@@ -120,9 +140,12 @@ class FileFieldTests(TestCase):
                 with TemporaryUploadedFile(
                     "foo.txt", "text/plain", 1, "utf-8"
                 ) as tmp_file:
-                    Document.objects.create(myfile=tmp_file)
-                    self.assertTrue(
-                        os.path.exists(os.path.join(tmp_dir, "unused", "foo.txt"))
+                    document = Document.objects.create(myfile=tmp_file)
+                    self.assertIs(
+                        document.myfile.storage.exists(
+                            os.path.join("unused", "foo.txt")
+                        ),
+                        True,
                     )
 
     def test_pickle(self):
@@ -186,3 +209,9 @@ class FileFieldTests(TestCase):
 
         document = MyDocument(myfile="test_file.py")
         self.assertEqual(document.myfile.field.model, MyDocument)
+
+    def test_upload_to_callable_sees_auto_now_add_field_value(self):
+        d = DocumentWithTimestamp(myfile=ContentFile(b"content", name="foo"))
+        d.save()
+        self.assertIsNotNone(d.created_at)
+        self.assertIs(d.myfile.name.startswith(f"{d.created_at.year}/foo"), True)

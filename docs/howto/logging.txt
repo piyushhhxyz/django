@@ -25,7 +25,7 @@ To send a log message from within your code, you place a logging call into it.
     logging, use a view function as suggested in the example below.
 
 First, import the Python logging library, and then obtain a logger instance
-with :py:func:`logging.getLogger`. Provide the ``getLogger()`` method with a
+with :func:`logging.getLogger`. Provide the ``getLogger()`` method with a
 name to identify it and the records it emits. A good option is to use
 ``__name__`` (see :ref:`naming-loggers` below for more on this) which will
 provide the name of the current Python module as a dotted path::
@@ -41,9 +41,9 @@ And then in a function, for example in a view, send a record to the logger::
     def some_view(request):
         ...
         if some_risky_state:
-            logger.warning('Platform is running at risk')
+            logger.warning("Platform is running at risk")
 
-When this code is executed, a :py:class:`~logging.LogRecord` containing that
+When this code is executed, a :class:`~logging.LogRecord` containing that
 message will be sent to the logger. If you're using Django's default logging
 configuration, the message will appear in the console.
 
@@ -51,7 +51,7 @@ The ``WARNING`` level used in the example above is one of several
 :ref:`logging severity levels <topic-logging-parts-loggers>`: ``DEBUG``,
 ``INFO``, ``WARNING``, ``ERROR``, ``CRITICAL``. So, another example might be::
 
-    logger.critical('Payment system is not responding')
+    logger.critical("Payment system is not responding")
 
 .. important::
 
@@ -99,8 +99,8 @@ Create a ``LOGGING`` dictionary
 In your ``settings.py``::
 
     LOGGING = {
-        'version': 1,                       # the dictConfig format version
-        'disable_existing_loggers': False,  # retain the default loggers
+        "version": 1,  # the dictConfig format version
+        "disable_existing_loggers": False,  # retain the default loggers
     }
 
 It nearly always makes sense to retain and extend the default logging
@@ -117,11 +117,11 @@ file ``general.log`` (at the project root):
     :emphasize-lines: 3-8
 
     LOGGING = {
-        [...]
-        'handlers': {
-            'file': {
-                'class': 'logging.FileHandler',
-                'filename': 'general.log',
+        # ...
+        "handlers": {
+            "file": {
+                "class": "logging.FileHandler",
+                "filename": "general.log",
             },
         },
     }
@@ -129,7 +129,7 @@ file ``general.log`` (at the project root):
 Different handler classes take different configuration options. For more
 information on available handler classes, see the
 :class:`~django.utils.log.AdminEmailHandler` provided by Django and the various
-:py:mod:`handler classes <logging.handlers>` provided by Python.
+:mod:`handler classes <logging.handlers>` provided by Python.
 
 Logging levels can also be set on the handlers (by default, they accept log
 messages of all levels). Using the example above, adding:
@@ -138,9 +138,9 @@ messages of all levels). Using the example above, adding:
     :emphasize-lines: 4
 
     {
-        'class': 'logging.FileHandler',
-        'filename': 'general.log',
-        'level': 'DEBUG',
+        "class": "logging.FileHandler",
+        "filename": "general.log",
+        "level": "DEBUG",
     }
 
 would define a handler configuration that only accepts records of level
@@ -156,11 +156,11 @@ example:
     :emphasize-lines: 3-8
 
     LOGGING = {
-        [...]
-        'loggers': {
-            '': {
-                'level': 'DEBUG',
-                'handlers': ['file'],
+        # ...
+        "loggers": {
+            "": {
+                "level": "DEBUG",
+                "handlers": ["file"],
             },
         },
     }
@@ -178,7 +178,7 @@ between loggers and handlers is many-to-many.
 
 If you execute::
 
-    logger.debug('Attempting to connect to API')
+    logger.debug("Attempting to connect to API")
 
 in your code, you will find that message in the file ``general.log`` in the
 root of the project.
@@ -186,24 +186,24 @@ root of the project.
 Configure a formatter
 ~~~~~~~~~~~~~~~~~~~~~
 
-By default, the final log output contains the message part of each :class:`log
-record <logging.LogRecord>`. Use a formatter if you want to include additional
-data. First name and define your formatters - this example defines
+By default, the final log output contains the message part of each
+:class:`~logging.LogRecord` object. Use a formatter if you want to include
+additional data. First name and define your formatters - this example defines
 formatters named ``verbose`` and ``simple``:
 
 .. code-block:: python
     :emphasize-lines: 3-12
 
     LOGGING = {
-        [...]
-        'formatters': {
-            'verbose': {
-                'format': '{name} {levelname} {asctime} {module} {process:d} {thread:d} {message}',
-                'style': '{',
+        # ...
+        "formatters": {
+            "verbose": {
+                "format": "{name} {levelname} {asctime} {module} {process:d} {thread:d} {message}",
+                "style": "{",
             },
-            'simple': {
-                'format': '{levelname} {message}',
-                'style': '{',
+            "simple": {
+                "format": "{levelname} {message}",
+                "style": "{",
             },
         },
     }
@@ -220,13 +220,13 @@ dictionary referring to the formatter by name, for example:
 .. code-block:: python
     :emphasize-lines: 5
 
-    'handlers': {
-        'file': {
-            'class': 'logging.FileHandler',
-            'filename': 'general.log',
-            'formatter': 'verbose',
+    "handlers": {
+        "file": {
+            "class": "logging.FileHandler",
+            "filename": "general.log",
+            "formatter": "verbose",
         },
-    },
+    }
 
 .. _naming-loggers:
 
@@ -238,7 +238,7 @@ application. A named logging configuration will capture logs only from loggers
 with matching names.
 
 The namespace of a logger instance is defined using
-:py:func:`~logging.getLogger`. For example in ``views.py`` of ``my_app``::
+:func:`~logging.getLogger`. For example in ``views.py`` of ``my_app``::
 
     logger = logging.getLogger(__name__)
 
@@ -253,11 +253,9 @@ A logger mapping named ``my_app.views`` will capture records from this logger:
     :emphasize-lines: 4
 
     LOGGING = {
-        [...]
-        'loggers': {
-            'my_app.views': {
-                ...
-            },
+        # ...
+        "loggers": {
+            "my_app.views": {...},
         },
     }
 
@@ -269,17 +267,15 @@ from loggers anywhere within the ``my_app`` namespace (including
     :emphasize-lines: 4
 
     LOGGING = {
-        [...]
-        'loggers': {
-            'my_app': {
-                ...
-            },
+        # ...
+        "loggers": {
+            "my_app": {...},
         },
     }
 
 You can also define logger namespacing explicitly::
 
-    logger = logging.getLogger('project.payment')
+    logger = logging.getLogger("project.payment")
 
 and set up logger mappings accordingly.
 
@@ -297,17 +293,17 @@ by a mapping for both ``my_app`` and ``my_app.views``.
 To manage this behavior, set the propagation key on the mappings you define::
 
     LOGGING = {
-        [...]
-        'loggers': {
-            'my_app': {
-                [...]
+        # ...
+        "loggers": {
+            "my_app": {
+                # ...
             },
-            'my_app.views': {
-                [...]
+            "my_app.views": {
+                # ...
             },
-            'my_app.views.private': {
-                [...]
-                'propagate': False,
+            "my_app.views.private": {
+                # ...
+                "propagate": False,
             },
         },
     }
@@ -333,7 +329,7 @@ For example, you could set an environment variable ``DJANGO_LOG_LEVEL``
 appropriately in your development and staging environments, and make use of it
 in a logger mapping thus::
 
-    'level': os.getenv('DJANGO_LOG_LEVEL', 'WARNING')
+    "level": os.getenv("DJANGO_LOG_LEVEL", "WARNING")
 
 \- so that unless the environment specifies a lower log level, this
 configuration will only forward records of severity ``WARNING`` and above to

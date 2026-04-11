@@ -4,7 +4,6 @@ from django.db.models import deletion
 
 
 class Migration(migrations.Migration):
-
     dependencies = [
         ("rasterapp", "0001_setup_extensions"),
     ]
@@ -15,7 +14,7 @@ class Migration(migrations.Migration):
             fields=[
                 (
                     "id",
-                    models.AutoField(
+                    models.BigAutoField(
                         auto_created=True,
                         primary_key=True,
                         serialize=False,
@@ -50,7 +49,7 @@ class Migration(migrations.Migration):
             fields=[
                 (
                     "id",
-                    models.AutoField(
+                    models.BigAutoField(
                         auto_created=True,
                         primary_key=True,
                         serialize=False,

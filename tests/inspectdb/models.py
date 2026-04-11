@@ -1,5 +1,6 @@
 from django.db import connection, models
 from django.db.models.functions import Lower
+from django.utils.functional import SimpleLazyObject
 
 
 class People(models.Model):
@@ -9,6 +10,7 @@ class People(models.Model):
 
 class Message(models.Model):
     from_field = models.ForeignKey(People, models.CASCADE, db_column="from_id")
+    author = models.ForeignKey(People, models.CASCADE, related_name="message_authors")
 
 
 class PeopleData(models.Model):
@@ -50,6 +52,11 @@ class SpecialName(models.Model):
         db_table = "inspectdb_special.table name"
 
 
+class PascalCaseName(models.Model):
+    class Meta:
+        db_table = "inspectdb_pascal.PascalCase"
+
+
 class ColumnTypes(models.Model):
     id = models.AutoField(primary_key=True)
     big_int_field = models.BigIntegerField()
@@ -88,7 +95,9 @@ class JSONFieldColumnType(models.Model):
         }
 
 
-test_collation = connection.features.test_collations.get("non_default")
+test_collation = SimpleLazyObject(
+    lambda: connection.features.test_collations.get("non_default")
+)
 
 
 class CharFieldDbCollation(models.Model):
@@ -103,6 +112,22 @@ class TextFieldDbCollation(models.Model):
 
     class Meta:
         required_db_features = {"supports_collation_on_textfield"}
+
+
+class CharFieldUnlimited(models.Model):
+    char_field = models.CharField(max_length=None)
+
+    class Meta:
+        required_db_features = {"supports_unlimited_charfield"}
+
+
+class DecimalFieldNoPrec(models.Model):
+    decimal_field_no_precision = models.DecimalField(
+        max_digits=None, decimal_places=None
+    )
+
+    class Meta:
+        required_db_features = {"supports_no_precision_decimalfield"}
 
 
 class UniqueTogether(models.Model):
@@ -131,3 +156,31 @@ class FuncUniqueConstraint(models.Model):
             )
         ]
         required_db_features = {"supports_expression_indexes"}
+
+
+class DbComment(models.Model):
+    rank = models.IntegerField(db_comment="'Rank' column comment")
+
+    class Meta:
+        db_table_comment = "Custom table comment"
+        required_db_features = {"supports_comments"}
+
+
+class CompositePKModel(models.Model):
+    pk = models.CompositePrimaryKey("column_1", "column_2")
+    column_1 = models.IntegerField()
+    column_2 = models.IntegerField()
+
+
+class DbOnDeleteModel(models.Model):
+    fk_do_nothing = models.ForeignKey(UniqueTogether, on_delete=models.DO_NOTHING)
+    fk_db_cascade = models.ForeignKey(ColumnTypes, on_delete=models.DB_CASCADE)
+    fk_set_null = models.ForeignKey(
+        DigitsInColumnName, on_delete=models.DB_SET_NULL, null=True
+    )
+
+    class Meta:
+        required_db_features = {
+            "supports_on_delete_db_cascade",
+            "supports_on_delete_db_null",
+        }

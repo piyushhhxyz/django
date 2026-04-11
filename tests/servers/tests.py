@@ -1,10 +1,12 @@
 """
 Tests for django.core.servers.
 """
+
 import errno
 import os
 import socket
 import threading
+import unittest
 from http.client import HTTPConnection
 from urllib.error import HTTPError
 from urllib.parse import urlencode
@@ -12,7 +14,7 @@ from urllib.request import urlopen
 
 from django.conf import settings
 from django.core.servers.basehttp import ThreadedWSGIServer, WSGIServer
-from django.db import DEFAULT_DB_ALIAS, connections
+from django.db import DEFAULT_DB_ALIAS, connection, connections
 from django.test import LiveServerTestCase, override_settings
 from django.test.testcases import LiveServerThread, QuietWSGIRequestHandler
 
@@ -29,7 +31,6 @@ TEST_SETTINGS = {
 
 @override_settings(ROOT_URLCONF="servers.urls", **TEST_SETTINGS)
 class LiveServerBase(LiveServerTestCase):
-
     available_apps = [
         "servers",
         "django.contrib.auth",
@@ -55,7 +56,6 @@ class CloseConnectionTestServer(ThreadedWSGIServer):
 
 
 class CloseConnectionTestLiveServerThread(LiveServerThread):
-
     server_class = CloseConnectionTestServer
 
     def _create_server(self, connections_override=None):
@@ -63,7 +63,6 @@ class CloseConnectionTestLiveServerThread(LiveServerThread):
 
 
 class LiveServerTestCloseConnectionTest(LiveServerBase):
-
     server_thread_class = CloseConnectionTestLiveServerThread
 
     @classmethod
@@ -107,8 +106,34 @@ class LiveServerTestCloseConnectionTest(LiveServerBase):
         self.assertIsNone(conn.connection)
 
 
+@unittest.skip("Flaky test as described in https://code.djangoproject.com/ticket/36770")
+@unittest.skipUnless(connection.vendor == "sqlite", "SQLite specific test.")
+class LiveServerInMemoryDatabaseLockTest(LiveServerBase):
+    def test_in_memory_database_lock(self):
+        """
+        With a threaded LiveServer and an in-memory database, an error can
+        occur when 2 requests reach the server and try to lock the database
+        at the same time, if the requests do not share the same database
+        connection.
+        """
+        conn = self.server_thread.connections_override[DEFAULT_DB_ALIAS]
+        source_connection = conn.connection
+        # Open a connection to the database.
+        conn.connect()
+        self.addCleanup(source_connection.close)
+        # Create a transaction to lock the database.
+        cursor = conn.cursor()
+        cursor.execute("BEGIN IMMEDIATE TRANSACTION")
+        self.addCleanup(cursor.execute, "ROLLBACK")
+        try:
+            with self.urlopen("/create_model_instance/") as f:
+                self.assertEqual(f.status, 200)
+        except HTTPError:
+            self.fail("Unexpected error due to a database lock.")
+
+
 class FailingLiveServerThread(LiveServerThread):
-    def _create_server(self):
+    def _create_server(self, connections_override=None):
         raise RuntimeError("Error creating server.")
 
 
@@ -150,7 +175,7 @@ class LiveServerAddress(LiveServerBase):
 
 
 class LiveServerSingleThread(LiveServerThread):
-    def _create_server(self):
+    def _create_server(self, connections_override=None):
         return WSGIServer(
             (self.host, self.port), QuietWSGIRequestHandler, allow_reuse_address=False
         )
@@ -172,8 +197,9 @@ class LiveServerViews(LiveServerBase):
         development server is rather simple we support it only in cases where
         we can detect a content length from the response. This should be doable
         for all simple views and streaming responses where an iterable with
-        length of one is passed. The latter follows as result of `set_content_length`
-        from https://github.com/python/cpython/blob/main/Lib/wsgiref/handlers.py.
+        length of one is passed. The latter follows as result of
+        `set_content_length` from
+        https://github.com/python/cpython/blob/main/Lib/wsgiref/handlers.py.
 
         If we cannot detect a content length we explicitly set the `Connection`
         header to `close` to notify the client that we do not actually support
@@ -184,26 +210,23 @@ class LiveServerViews(LiveServerBase):
             LiveServerViews.server_thread.port,
             timeout=1,
         )
-        try:
-            conn.request(
-                "GET", "/streaming_example_view/", headers={"Connection": "keep-alive"}
-            )
-            response = conn.getresponse()
-            self.assertTrue(response.will_close)
-            self.assertEqual(response.read(), b"Iamastream")
-            self.assertEqual(response.status, 200)
-            self.assertEqual(response.getheader("Connection"), "close")
+        self.addCleanup(conn.close)
 
-            conn.request(
-                "GET", "/streaming_example_view/", headers={"Connection": "close"}
-            )
-            response = conn.getresponse()
-            self.assertTrue(response.will_close)
-            self.assertEqual(response.read(), b"Iamastream")
-            self.assertEqual(response.status, 200)
-            self.assertEqual(response.getheader("Connection"), "close")
-        finally:
-            conn.close()
+        conn.request(
+            "GET", "/streaming_example_view/", headers={"Connection": "keep-alive"}
+        )
+        response = conn.getresponse()
+        self.assertTrue(response.will_close)
+        self.assertEqual(response.read(), b"Iamastream")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Connection"), "close")
+
+        conn.request("GET", "/streaming_example_view/", headers={"Connection": "close"})
+        response = conn.getresponse()
+        self.assertTrue(response.will_close)
+        self.assertEqual(response.read(), b"Iamastream")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Connection"), "close")
 
     def test_keep_alive_on_connection_with_content_length(self):
         """
@@ -214,45 +237,41 @@ class LiveServerViews(LiveServerBase):
         conn = HTTPConnection(
             LiveServerViews.server_thread.host, LiveServerViews.server_thread.port
         )
-        try:
-            conn.request("GET", "/example_view/", headers={"Connection": "keep-alive"})
-            response = conn.getresponse()
-            self.assertFalse(response.will_close)
-            self.assertEqual(response.read(), b"example view")
-            self.assertEqual(response.status, 200)
-            self.assertIsNone(response.getheader("Connection"))
+        self.addCleanup(conn.close)
 
-            conn.request("GET", "/example_view/", headers={"Connection": "close"})
-            response = conn.getresponse()
-            self.assertFalse(response.will_close)
-            self.assertEqual(response.read(), b"example view")
-            self.assertEqual(response.status, 200)
-            self.assertIsNone(response.getheader("Connection"))
-        finally:
-            conn.close()
+        conn.request("GET", "/example_view/", headers={"Connection": "keep-alive"})
+        response = conn.getresponse()
+        self.assertFalse(response.will_close)
+        self.assertEqual(response.read(), b"example view")
+        self.assertEqual(response.status, 200)
+        self.assertIsNone(response.getheader("Connection"))
+
+        conn.request("GET", "/example_view/", headers={"Connection": "close"})
+        response = conn.getresponse()
+        self.assertFalse(response.will_close)
+        self.assertEqual(response.read(), b"example view")
+        self.assertEqual(response.status, 200)
+        self.assertIsNone(response.getheader("Connection"))
 
     def test_keep_alive_connection_clears_previous_request_data(self):
         conn = HTTPConnection(
             LiveServerViews.server_thread.host, LiveServerViews.server_thread.port
         )
-        try:
-            conn.request(
-                "POST", "/method_view/", b"{}", headers={"Connection": "keep-alive"}
-            )
-            response = conn.getresponse()
-            self.assertFalse(response.will_close)
-            self.assertEqual(response.status, 200)
-            self.assertEqual(response.read(), b"POST")
+        self.addCleanup(conn.close)
 
-            conn.request(
-                "POST", "/method_view/", b"{}", headers={"Connection": "close"}
-            )
-            response = conn.getresponse()
-            self.assertFalse(response.will_close)
-            self.assertEqual(response.status, 200)
-            self.assertEqual(response.read(), b"POST")
-        finally:
-            conn.close()
+        conn.request(
+            "POST", "/method_view/", b"{}", headers={"Connection": "keep-alive"}
+        )
+        response = conn.getresponse()
+        self.assertFalse(response.will_close)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.read(), b"POST")
+
+        conn.request("POST", "/method_view/", b"{}", headers={"Connection": "close"})
+        response = conn.getresponse()
+        self.assertFalse(response.will_close)
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.read(), b"POST")
 
     def test_404(self):
         with self.assertRaises(HTTPError) as err:
@@ -303,15 +322,13 @@ class SingleThreadLiveServerViews(SingleThreadLiveServerTestCase):
             SingleThreadLiveServerViews.server_thread.port,
             timeout=1,
         )
-        try:
-            conn.request("GET", "/example_view/", headers={"Connection": "keep-alive"})
-            response = conn.getresponse()
-            self.assertTrue(response.will_close)
-            self.assertEqual(response.read(), b"example view")
-            self.assertEqual(response.status, 200)
-            self.assertEqual(response.getheader("Connection"), "close")
-        finally:
-            conn.close()
+        self.addCleanup(conn.close)
+        conn.request("GET", "/example_view/", headers={"Connection": "keep-alive"})
+        response = conn.getresponse()
+        self.assertTrue(response.will_close)
+        self.assertEqual(response.read(), b"example view")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Connection"), "close")
 
 
 class LiveServerDatabase(LiveServerBase):
@@ -328,7 +345,7 @@ class LiveServerDatabase(LiveServerBase):
         """
         with self.urlopen("/create_model_instance/"):
             pass
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             Person.objects.order_by("pk"),
             ["jane", "robert", "emily"],
             lambda b: b.name,
@@ -351,12 +368,15 @@ class LiveServerPort(LiveServerBase):
                 return
             # Unexpected error.
             raise
-        self.assertNotEqual(
-            self.live_server_url,
-            TestCase.live_server_url,
-            f"Acquired duplicate server addresses for server threads: "
-            f"{self.live_server_url}",
-        )
+        try:
+            self.assertNotEqual(
+                self.live_server_url,
+                TestCase.live_server_url,
+                f"Acquired duplicate server addresses for server threads: "
+                f"{self.live_server_url}",
+            )
+        finally:
+            TestCase.doClassCleanups()
 
     def test_specified_port_bind(self):
         """LiveServerTestCase.port customizes the server's port."""
@@ -367,12 +387,15 @@ class LiveServerPort(LiveServerBase):
         TestCase.port = s.getsockname()[1]
         s.close()
         TestCase._start_server_thread()
-        self.assertEqual(
-            TestCase.port,
-            TestCase.server_thread.port,
-            f"Did not use specified port for LiveServerTestCase thread: "
-            f"{TestCase.port}",
-        )
+        try:
+            self.assertEqual(
+                TestCase.port,
+                TestCase.server_thread.port,
+                f"Did not use specified port for LiveServerTestCase thread: "
+                f"{TestCase.port}",
+            )
+        finally:
+            TestCase.doClassCleanups()
 
 
 class LiveServerThreadedTests(LiveServerBase):

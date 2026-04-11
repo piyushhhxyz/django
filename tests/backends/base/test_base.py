@@ -1,10 +1,18 @@
+import gc
 from unittest.mock import MagicMock, patch
 
-from django.db import DEFAULT_DB_ALIAS, connection, connections
+from django.db import DEFAULT_DB_ALIAS, connection, connections, transaction
 from django.db.backends.base.base import BaseDatabaseWrapper
-from django.test import SimpleTestCase, TestCase, skipUnlessDBFeature
+from django.test import (
+    SimpleTestCase,
+    TestCase,
+    TransactionTestCase,
+    skipUnlessDBFeature,
+)
+from django.test.runner import DebugSQLTextTestResult
+from django.test.utils import CaptureQueriesContext, override_settings
 
-from ..models import Square
+from ..models import Person, Square
 
 
 class DatabaseWrapperTests(SimpleTestCase):
@@ -53,6 +61,90 @@ class DatabaseWrapperTests(SimpleTestCase):
     def test_check_database_version_supported_with_none_as_database_version(self):
         with patch.object(connection.features, "minimum_database_version", None):
             connection.check_database_version_supported()
+
+    def test_release_memory_without_garbage_collection(self):
+        # Schedule the restore of the garbage collection settings.
+        self.addCleanup(gc.set_debug, 0)
+        self.addCleanup(gc.enable)
+
+        # Disable automatic garbage collection to control when it's triggered,
+        # then run a full collection cycle to ensure `gc.garbage` is empty.
+        gc.disable()
+        gc.collect()
+
+        # The garbage list isn't automatically populated to avoid CPU overhead,
+        # so debugging needs to be enabled to track all unreachable items and
+        # have them stored in `gc.garbage`.
+        gc.set_debug(gc.DEBUG_SAVEALL)
+
+        # Create a new connection that will be closed during the test, and also
+        # ensure that a `DatabaseErrorWrapper` is created for this connection.
+        test_connection = connection.copy()
+        with test_connection.wrap_database_errors:
+            self.assertEqual(test_connection.queries, [])
+
+        # Close the connection and remove references to it. This will mark all
+        # objects related to the connection as garbage to be collected.
+        test_connection.close()
+        test_connection = None
+
+        # Enforce garbage collection to populate `gc.garbage` for inspection.
+        gc.collect()
+        self.assertEqual(gc.garbage, [])
+
+
+@skipUnlessDBFeature("supports_transactions")
+class DatabaseWrapperLoggingTests(TransactionTestCase):
+    available_apps = ["backends"]
+
+    @override_settings(DEBUG=True)
+    def test_commit_debug_log(self):
+        conn = connections[DEFAULT_DB_ALIAS]
+        with CaptureQueriesContext(conn):
+            with self.assertLogs("django.db.backends", "DEBUG") as cm:
+                with transaction.atomic():
+                    Person.objects.create(first_name="first", last_name="last")
+
+                self.assertGreaterEqual(len(conn.queries_log), 3)
+                self.assertEqual(conn.queries_log[-3]["sql"], "BEGIN")
+                self.assertRegex(
+                    cm.output[0],
+                    r"DEBUG:django.db.backends:\(\d+.\d{3}\) "
+                    rf"BEGIN; args=None; alias={DEFAULT_DB_ALIAS}",
+                )
+                self.assertEqual(conn.queries_log[-1]["sql"], "COMMIT")
+                self.assertRegex(
+                    cm.output[-1],
+                    r"DEBUG:django.db.backends:\(\d+.\d{3}\) "
+                    rf"COMMIT; args=None; alias={DEFAULT_DB_ALIAS}",
+                )
+
+    @override_settings(DEBUG=True)
+    def test_rollback_debug_log(self):
+        conn = connections[DEFAULT_DB_ALIAS]
+        with CaptureQueriesContext(conn):
+            with self.assertLogs("django.db.backends", "DEBUG") as cm:
+                with self.assertRaises(Exception), transaction.atomic():
+                    Person.objects.create(first_name="first", last_name="last")
+                    raise Exception("Force rollback")
+
+                self.assertEqual(conn.queries_log[-1]["sql"], "ROLLBACK")
+                self.assertRegex(
+                    cm.output[-1],
+                    r"DEBUG:django.db.backends:\(\d+.\d{3}\) "
+                    rf"ROLLBACK; args=None; alias={DEFAULT_DB_ALIAS}",
+                )
+
+    def test_no_logs_without_debug(self):
+        if isinstance(self._outcome.result, DebugSQLTextTestResult):
+            self.skipTest("--debug-sql interferes with this test")
+        with self.assertNoLogs("django.db.backends", "DEBUG"):
+            with self.assertRaises(Exception), transaction.atomic():
+                Person.objects.create(first_name="first", last_name="last")
+                raise Exception("Force rollback")
+
+            conn = connections[DEFAULT_DB_ALIAS]
+            self.assertEqual(len(conn.queries_log), 0)
 
 
 class ExecuteWrapperTests(TestCase):
@@ -111,8 +203,9 @@ class ExecuteWrapperTests(TestCase):
     def test_nested_wrapper_invoked(self):
         outer_wrapper = self.mock_wrapper()
         inner_wrapper = self.mock_wrapper()
-        with connection.execute_wrapper(outer_wrapper), connection.execute_wrapper(
-            inner_wrapper
+        with (
+            connection.execute_wrapper(outer_wrapper),
+            connection.execute_wrapper(inner_wrapper),
         ):
             self.call_execute(connection)
             self.assertEqual(inner_wrapper.call_count, 1)
@@ -125,8 +218,10 @@ class ExecuteWrapperTests(TestCase):
 
         wrapper = self.mock_wrapper()
         c = connection  # This alias shortens the next line.
-        with c.execute_wrapper(wrapper), c.execute_wrapper(blocker), c.execute_wrapper(
-            wrapper
+        with (
+            c.execute_wrapper(wrapper),
+            c.execute_wrapper(blocker),
+            c.execute_wrapper(wrapper),
         ):
             with c.cursor() as cursor:
                 cursor.execute("The database never sees this")
@@ -150,6 +245,16 @@ class ExecuteWrapperTests(TestCase):
         self.assertFalse(wrapper.called)
         self.assertEqual(connection.execute_wrappers, [])
         self.assertEqual(connections["other"].execute_wrappers, [])
+
+    def test_wrapper_debug(self):
+        def wrap_with_comment(execute, sql, params, many, context):
+            return execute(f"/* My comment */ {sql}", params, many, context)
+
+        with CaptureQueriesContext(connection) as ctx:
+            with connection.execute_wrapper(wrap_with_comment):
+                list(Person.objects.all())
+        last_query = ctx.captured_queries[-1]["sql"]
+        self.assertTrue(last_query.startswith("/* My comment */"))
 
 
 class ConnectionHealthChecksTests(SimpleTestCase):

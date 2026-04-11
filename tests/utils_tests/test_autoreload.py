@@ -9,15 +9,11 @@ import time
 import types
 import weakref
 import zipfile
+import zoneinfo
 from importlib import import_module
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest import mock, skip, skipIf
-
-try:
-    import zoneinfo
-except ImportError:
-    from backports import zoneinfo
 
 import django.__main__
 from django.apps.registry import Apps
@@ -242,6 +238,17 @@ class TestChildArguments(SimpleTestCase):
                     autoreload.get_child_arguments(), [exe_path, "runserver"]
                 )
 
+    @mock.patch("sys.warnoptions", [])
+    @mock.patch.dict(sys.modules, {"__main__": django.__main__})
+    def test_use_exe_when_main_spec(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            exe_path = Path(tmpdir) / "django-admin.exe"
+            exe_path.touch()
+            with mock.patch("sys.argv", [exe_path.with_suffix(""), "runserver"]):
+                self.assertEqual(
+                    autoreload.get_child_arguments(), [exe_path, "runserver"]
+                )
+
     @mock.patch("__main__.__spec__", None)
     @mock.patch("sys.warnoptions", [])
     @mock.patch("sys._xoptions", {})
@@ -308,13 +315,11 @@ class TestCommonRoots(SimpleTestCase):
 
 class TestSysPathDirectories(SimpleTestCase):
     def setUp(self):
-        self._directory = tempfile.TemporaryDirectory()
-        self.directory = Path(self._directory.name).resolve(strict=True).absolute()
+        _directory = tempfile.TemporaryDirectory()
+        self.addCleanup(_directory.cleanup)
+        self.directory = Path(_directory.name).resolve(strict=True).absolute()
         self.file = self.directory / "test"
         self.file.touch()
-
-    def tearDown(self):
-        self._directory.cleanup()
 
     def test_sys_paths_with_directories(self):
         with extend_sys_path(str(self.file)):
@@ -381,16 +386,6 @@ class RunWithReloaderTests(SimpleTestCase):
 
 
 class StartDjangoTests(SimpleTestCase):
-    @mock.patch("django.utils.autoreload.StatReloader")
-    def test_watchman_becomes_unavailable(self, mocked_stat):
-        mocked_stat.should_stop.return_value = True
-        fake_reloader = mock.MagicMock()
-        fake_reloader.should_stop = False
-        fake_reloader.run.side_effect = autoreload.WatchmanUnavailable()
-
-        autoreload.start_django(fake_reloader, lambda: None)
-        self.assertEqual(mocked_stat.call_count, 1)
-
     @mock.patch("django.utils.autoreload.ensure_echo_on")
     def test_echo_on_called(self, mocked_echo):
         fake_reloader = mock.MagicMock()
@@ -438,6 +433,18 @@ class TestCheckErrors(SimpleTestCase):
             finally:
                 autoreload._exception = None
         self.assertEqual(mocked_error_files.append.call_count, 1)
+
+    def test_urlconf_exception_is_used_as_cause(self):
+        urlconf_exc = ValueError("Error")
+        fake_method = mock.MagicMock(side_effect=RuntimeError())
+        wrapped = autoreload.check_errors(fake_method)
+        with mock.patch.object(autoreload, "_url_module_exception", urlconf_exc):
+            try:
+                with self.assertRaises(RuntimeError) as cm:
+                    wrapped()
+            finally:
+                autoreload._exception = None
+        self.assertIs(cm.exception.__cause__, urlconf_exc)
 
 
 class TestRaiseLastException(SimpleTestCase):
@@ -540,20 +547,65 @@ class RestartWithReloaderTests(SimpleTestCase):
                 [self.executable, "-Wall", "-m", "django"] + argv[1:],
             )
 
+    def test_propagates_unbuffered_from_parent(self):
+        for args in ("-u", "-Iuv"):
+            with self.subTest(args=args):
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    with tempfile.TemporaryDirectory() as d:
+                        script = Path(d) / "manage.py"
+                        script.touch()
+                        mock_call = self.patch_autoreload([str(script), "runserver"])
+                        with (
+                            mock.patch("__main__.__spec__", None),
+                            mock.patch.object(
+                                autoreload.sys,
+                                "orig_argv",
+                                [self.executable, args, str(script), "runserver"],
+                            ),
+                        ):
+                            autoreload.restart_with_reloader()
+                    env = mock_call.call_args.kwargs["env"]
+                    self.assertEqual(env.get("PYTHONUNBUFFERED"), "1")
+
+    def test_does_not_propagate_unbuffered_from_parent(self):
+        for args in (
+            "-Xdev",
+            "-Xfaulthandler",
+            "--user",
+            "-Wall",
+            "-Wdefault",
+            "-Wignore::UserWarning",
+        ):
+            with self.subTest(args=args):
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    with tempfile.TemporaryDirectory() as d:
+                        script = Path(d) / "manage.py"
+                        script.touch()
+                        mock_call = self.patch_autoreload([str(script), "runserver"])
+                        with (
+                            mock.patch("__main__.__spec__", None),
+                            mock.patch.object(
+                                autoreload.sys,
+                                "orig_argv",
+                                [self.executable, args, str(script), "runserver"],
+                            ),
+                        ):
+                            autoreload.restart_with_reloader()
+                    env = mock_call.call_args.kwargs["env"]
+                    self.assertIsNone(env.get("PYTHONUNBUFFERED"))
+
 
 class ReloaderTests(SimpleTestCase):
     RELOADER_CLS = None
 
     def setUp(self):
-        self._tempdir = tempfile.TemporaryDirectory()
-        self.tempdir = Path(self._tempdir.name).resolve(strict=True).absolute()
+        _tempdir = tempfile.TemporaryDirectory()
+        self.tempdir = Path(_tempdir.name).resolve(strict=True).absolute()
         self.existing_file = self.ensure_file(self.tempdir / "test.py")
         self.nonexistent_file = (self.tempdir / "does_not_exist.py").absolute()
         self.reloader = self.RELOADER_CLS()
-
-    def tearDown(self):
-        self._tempdir.cleanup()
-        self.reloader.stop()
+        self.addCleanup(self.reloader.stop)
+        self.addCleanup(_tempdir.cleanup)
 
     def ensure_file(self, path):
         path.parent.mkdir(exist_ok=True, parents=True)

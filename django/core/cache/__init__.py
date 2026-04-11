@@ -3,7 +3,7 @@ Caching framework.
 
 This package defines set of cache backends that all conform to a simple API.
 In a nutshell, a cache is a set of values -- which can be any object that
-may be pickled -- identified by string keys.  For the complete API, see
+may be pickled -- identified by string keys. For the complete API, see
 the abstract BaseCache class in django.core.cache.backends.base.
 
 Client code should use the `cache` variable defined here to access the default
@@ -12,6 +12,7 @@ object.
 
 See docs/topics/cache.txt for information on the public API.
 """
+
 from django.core import signals
 from django.core.cache.backends.base import (
     BaseCache,
@@ -60,8 +61,7 @@ cache = ConnectionProxy(caches, DEFAULT_CACHE_ALIAS)
 def close_caches(**kwargs):
     # Some caches need to do a cleanup at the end of a request cycle. If not
     # implemented in a particular backend cache.close() is a no-op.
-    for cache in caches.all(initialized_only=True):
-        cache.close()
+    caches.close_all()
 
 
 signals.request_finished.connect(close_caches)

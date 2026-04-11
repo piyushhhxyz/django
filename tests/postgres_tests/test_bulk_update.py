@@ -1,24 +1,22 @@
 from datetime import date
 
-from django.test import modify_settings
-
 from . import PostgreSQLTestCase
 from .models import (
     HStoreModel,
     IntegerArrayModel,
     NestedIntegerArrayModel,
     NullableIntegerArrayModel,
+    OffByOneModel,
     OtherTypesArrayModel,
     RangesModel,
 )
 
 try:
-    from psycopg2.extras import DateRange, NumericRange
+    from django.db.backends.postgresql.psycopg_any import DateRange, NumericRange
 except ImportError:
-    pass  # psycopg2 isn't installed.
+    pass  # psycopg isn't installed.
 
 
-@modify_settings(INSTALLED_APPS={"append": "django.contrib.postgres"})
 class BulkSaveTests(PostgreSQLTestCase):
     def test_bulk_update(self):
         test_data = [
@@ -47,3 +45,10 @@ class BulkSaveTests(PostgreSQLTestCase):
                 self.assertSequenceEqual(
                     Model.objects.filter(**{field: new}), instances
                 )
+
+    def test_bulk_create(self):
+        OffByOneModel.objects.bulk_create(OffByOneModel(one_off=0) for _ in range(20))
+
+        self.assertSequenceEqual(
+            [m.one_off for m in OffByOneModel.objects.all()], 20 * [1]
+        )

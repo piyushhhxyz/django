@@ -32,7 +32,7 @@ class ActionAdmin(admin.ModelAdmin):
 
     def get_urls(self):
         # Add the URL of our custom 'add_view' view to the front of the URLs
-        # list.  Remove the existing one(s) first
+        # list. Remove the existing one(s) first
         from django.urls import re_path
 
         def wrap(view):
@@ -41,7 +41,7 @@ class ActionAdmin(admin.ModelAdmin):
 
             return update_wrapper(wrapper, view)
 
-        info = self.model._meta.app_label, self.model._meta.model_name
+        info = self.opts.app_label, self.opts.model_name
 
         view_name = "%s_%s_add" % info
 

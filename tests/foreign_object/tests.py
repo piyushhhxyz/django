@@ -3,10 +3,11 @@ import datetime
 import pickle
 from operator import attrgetter
 
-from django.core.exceptions import FieldError
-from django.db import models
+from django.core.exceptions import FieldError, ValidationError
+from django.db import connection, models
+from django.db.models import FETCH_PEERS
 from django.test import SimpleTestCase, TestCase, skipUnlessDBFeature
-from django.test.utils import isolate_apps
+from django.test.utils import CaptureQueriesContext, isolate_apps
 from django.utils import translation
 
 from .models import (
@@ -15,6 +16,7 @@ from .models import (
     ArticleTag,
     ArticleTranslation,
     Country,
+    CustomerTab,
     Friendship,
     Group,
     Membership,
@@ -72,7 +74,8 @@ class MultiColumnFKTests(TestCase):
             getattr(membership, "person")
 
     def test_reverse_query_returns_correct_result(self):
-        # Creating a valid membership because it has the same country has the person
+        # Creating a valid membership because it has the same country has the
+        # person
         Membership.objects.create(
             membership_country_id=self.usa.id,
             person_id=self.bob.id,
@@ -93,7 +96,6 @@ class MultiColumnFKTests(TestCase):
             self.assertIs(membership.person, self.bob)
 
     def test_query_filters_correctly(self):
-
         # Creating a to valid memberships
         Membership.objects.create(
             membership_country_id=self.usa.id,
@@ -113,15 +115,14 @@ class MultiColumnFKTests(TestCase):
             group_id=self.cia.id,
         )
 
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             Membership.objects.filter(person__name__contains="o"),
             [self.bob.id],
             attrgetter("person_id"),
         )
 
     def test_reverse_query_filters_correctly(self):
-
-        timemark = datetime.datetime.now(tz=datetime.timezone.utc).replace(tzinfo=None)
+        timemark = datetime.datetime.now(tz=datetime.UTC).replace(tzinfo=None)
         timedelta = datetime.timedelta(days=1)
 
         # Creating a to valid memberships
@@ -146,7 +147,7 @@ class MultiColumnFKTests(TestCase):
             date_joined=timemark + timedelta,
         )
 
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             Person.objects.filter(membership__date_joined__gte=timemark),
             ["Jim"],
             attrgetter("name"),
@@ -171,14 +172,14 @@ class MultiColumnFKTests(TestCase):
             group_id=self.cia.id,
         )
 
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             Membership.objects.filter(person__in=[self.george, self.jim]),
             [
                 self.jim.id,
             ],
             attrgetter("person_id"),
         )
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             Membership.objects.filter(person__in=Person.objects.filter(name="Jim")),
             [
                 self.jim.id,
@@ -224,6 +225,13 @@ class MultiColumnFKTests(TestCase):
             [m2],
         )
 
+    def test_query_does_not_mutate(self):
+        """
+        Recompiling the same subquery doesn't mutate it.
+        """
+        queryset = Friendship.objects.filter(to_friend__in=Person.objects.all())
+        self.assertEqual(str(queryset.query), str(queryset.query))
+
     def test_select_related_foreignkey_forward_works(self):
         Membership.objects.create(
             membership_country=self.usa, person=self.bob, group=self.cia
@@ -241,7 +249,7 @@ class MultiColumnFKTests(TestCase):
         normal_people = [m.person for m in Membership.objects.order_by("pk")]
         self.assertEqual(people, normal_people)
 
-    def test_prefetch_foreignkey_forward_works(self):
+    def test_prefetch_foreignobject_forward(self):
         Membership.objects.create(
             membership_country=self.usa, person=self.bob, group=self.cia
         )
@@ -258,7 +266,53 @@ class MultiColumnFKTests(TestCase):
         normal_people = [m.person for m in Membership.objects.order_by("pk")]
         self.assertEqual(people, normal_people)
 
-    def test_prefetch_foreignkey_reverse_works(self):
+    def test_prefetch_foreignobject_hidden_forward(self):
+        Friendship.objects.create(
+            from_friend_country=self.usa,
+            from_friend_id=self.bob.id,
+            to_friend_country_id=self.usa.id,
+            to_friend_id=self.george.id,
+        )
+        Friendship.objects.create(
+            from_friend_country=self.usa,
+            from_friend_id=self.bob.id,
+            to_friend_country_id=self.soviet_union.id,
+            to_friend_id=self.sam.id,
+        )
+        with self.assertNumQueries(2) as ctx:
+            friendships = list(
+                Friendship.objects.prefetch_related("to_friend").order_by("pk")
+            )
+        prefetch_sql = ctx[-1]["sql"]
+        # Prefetch queryset should be filtered by all foreign related fields
+        # to prevent extra rows from being eagerly fetched.
+        prefetch_where_sql = prefetch_sql.split("WHERE")[-1]
+        for to_field_name in Friendship.to_friend.field.to_fields:
+            to_field = Person._meta.get_field(to_field_name)
+            with self.subTest(to_field=to_field):
+                self.assertIn(
+                    connection.ops.quote_name(to_field.column),
+                    prefetch_where_sql,
+                )
+        self.assertNotIn(" JOIN ", prefetch_sql)
+        with self.assertNumQueries(0):
+            self.assertEqual(friendships[0].to_friend, self.george)
+            self.assertEqual(friendships[1].to_friend, self.sam)
+
+    def test_prefetch_foreignobject_null_hidden_forward_skipped(self):
+        fiendship = Friendship.objects.create(
+            from_friend_country=self.usa,
+            from_friend_id=self.bob.id,
+            to_friend_country_id=self.usa.id,
+            to_friend_id=None,
+        )
+        with self.assertNumQueries(1):
+            self.assertEqual(
+                Friendship.objects.prefetch_related("to_friend").get(),
+                fiendship,
+            )
+
+    def test_prefetch_foreignobject_reverse(self):
         Membership.objects.create(
             membership_country=self.usa, person=self.bob, group=self.cia
         )
@@ -281,7 +335,7 @@ class MultiColumnFKTests(TestCase):
 
     def test_m2m_through_forward_returns_valid_members(self):
         # We start out by making sure that the Group 'CIA' has no members.
-        self.assertQuerysetEqual(self.cia.members.all(), [])
+        self.assertQuerySetEqual(self.cia.members.all(), [])
 
         Membership.objects.create(
             membership_country=self.usa, person=self.bob, group=self.cia
@@ -292,13 +346,13 @@ class MultiColumnFKTests(TestCase):
 
         # Bob and Jim should be members of the CIA.
 
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             self.cia.members.all(), ["Bob", "Jim"], attrgetter("name")
         )
 
     def test_m2m_through_reverse_returns_valid_members(self):
         # We start out by making sure that Bob is in no groups.
-        self.assertQuerysetEqual(self.bob.groups.all(), [])
+        self.assertQuerySetEqual(self.bob.groups.all(), [])
 
         Membership.objects.create(
             membership_country=self.usa, person=self.bob, group=self.cia
@@ -308,13 +362,13 @@ class MultiColumnFKTests(TestCase):
         )
 
         # Bob should be in the CIA and a Republican
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             self.bob.groups.all(), ["CIA", "Republican"], attrgetter("name")
         )
 
     def test_m2m_through_forward_ignores_invalid_members(self):
         # We start out by making sure that the Group 'CIA' has no members.
-        self.assertQuerysetEqual(self.cia.members.all(), [])
+        self.assertQuerySetEqual(self.cia.members.all(), [])
 
         # Something adds jane to group CIA but Jane is in Soviet Union which
         # isn't CIA's country.
@@ -323,11 +377,11 @@ class MultiColumnFKTests(TestCase):
         )
 
         # There should still be no members in CIA
-        self.assertQuerysetEqual(self.cia.members.all(), [])
+        self.assertQuerySetEqual(self.cia.members.all(), [])
 
     def test_m2m_through_reverse_ignores_invalid_members(self):
         # We start out by making sure that Jane has no groups.
-        self.assertQuerysetEqual(self.jane.groups.all(), [])
+        self.assertQuerySetEqual(self.jane.groups.all(), [])
 
         # Something adds jane to group CIA but Jane is in Soviet Union which
         # isn't CIA's country.
@@ -336,10 +390,10 @@ class MultiColumnFKTests(TestCase):
         )
 
         # Jane should still not be in any groups
-        self.assertQuerysetEqual(self.jane.groups.all(), [])
+        self.assertQuerySetEqual(self.jane.groups.all(), [])
 
     def test_m2m_through_on_self_works(self):
-        self.assertQuerysetEqual(self.jane.friends.all(), [])
+        self.assertQuerySetEqual(self.jane.friends.all(), [])
 
         Friendship.objects.create(
             from_friend_country=self.jane.person_country,
@@ -348,12 +402,12 @@ class MultiColumnFKTests(TestCase):
             to_friend=self.george,
         )
 
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             self.jane.friends.all(), ["George"], attrgetter("name")
         )
 
     def test_m2m_through_on_self_ignores_mismatch_columns(self):
-        self.assertQuerysetEqual(self.jane.friends.all(), [])
+        self.assertQuerySetEqual(self.jane.friends.all(), [])
 
         # Note that we use ids instead of instances. This is because instances
         # on ForeignObject properties will set all related field off of the
@@ -365,7 +419,7 @@ class MultiColumnFKTests(TestCase):
             from_friend_country_id=self.george.person_country_id,
         )
 
-        self.assertQuerysetEqual(self.jane.friends.all(), [])
+        self.assertQuerySetEqual(self.jane.friends.all(), [])
 
     def test_prefetch_related_m2m_forward_works(self):
         Membership.objects.create(
@@ -398,6 +452,15 @@ class MultiColumnFKTests(TestCase):
 
         normal_groups_lists = [list(p.groups.all()) for p in Person.objects.all()]
         self.assertEqual(groups_lists, normal_groups_lists)
+
+    def test_refresh_foreign_object(self):
+        member = Membership.objects.create(
+            membership_country=self.usa, person=self.bob, group=self.cia
+        )
+        member.person = self.jim
+        with self.assertNumQueries(1):
+            member.refresh_from_db()
+        self.assertEqual(member.person, self.bob)
 
     @translation.override("fi")
     def test_translations(self):
@@ -510,18 +573,71 @@ class MultiColumnFKTests(TestCase):
 
     def test_isnull_lookup(self):
         m1 = Membership.objects.create(
-            membership_country=self.usa, person=self.bob, group_id=None
+            person_id=self.bob.id,
+            membership_country_id=self.usa.id,
+            group_id=None,
         )
         m2 = Membership.objects.create(
-            membership_country=self.usa, person=self.bob, group=self.cia
+            person_id=self.jim.id,
+            membership_country_id=None,
+            group_id=self.cia.id,
         )
+        m3 = Membership.objects.create(
+            person_id=self.jane.id,
+            membership_country_id=None,
+            group_id=None,
+        )
+        m4 = Membership.objects.create(
+            person_id=self.george.id,
+            membership_country_id=self.soviet_union.id,
+            group_id=self.kgb.id,
+        )
+        for member in [m1, m2, m3]:
+            with self.assertRaises(Membership.group.RelatedObjectDoesNotExist):
+                getattr(member, "group")
         self.assertSequenceEqual(
             Membership.objects.filter(group__isnull=True),
-            [m1],
+            [m1, m2, m3],
         )
         self.assertSequenceEqual(
             Membership.objects.filter(group__isnull=False),
-            [m2],
+            [m4],
+        )
+
+    def test_fetch_mode_copied_forward_fetching_one(self):
+        person = Person.objects.fetch_mode(FETCH_PEERS).get(pk=self.bob.pk)
+        self.assertEqual(person._state.fetch_mode, FETCH_PEERS)
+        self.assertEqual(
+            person.person_country._state.fetch_mode,
+            FETCH_PEERS,
+        )
+
+    def test_fetch_mode_copied_forward_fetching_many(self):
+        people = list(Person.objects.fetch_mode(FETCH_PEERS))
+        person = people[0]
+        self.assertEqual(person._state.fetch_mode, FETCH_PEERS)
+        self.assertEqual(
+            person.person_country._state.fetch_mode,
+            FETCH_PEERS,
+        )
+
+    def test_fetch_mode_copied_reverse_fetching_one(self):
+        country = Country.objects.fetch_mode(FETCH_PEERS).get(pk=self.usa.pk)
+        self.assertEqual(country._state.fetch_mode, FETCH_PEERS)
+        person = country.person_set.get(pk=self.bob.pk)
+        self.assertEqual(
+            person._state.fetch_mode,
+            FETCH_PEERS,
+        )
+
+    def test_fetch_mode_copied_reverse_fetching_many(self):
+        countries = list(Country.objects.fetch_mode(FETCH_PEERS))
+        country = countries[0]
+        self.assertEqual(country._state.fetch_mode, FETCH_PEERS)
+        person = country.person_set.earliest("pk")
+        self.assertEqual(
+            person._state.fetch_mode,
+            FETCH_PEERS,
         )
 
 
@@ -663,7 +779,7 @@ class TestCachedPathInfo(TestCase):
 
         ForeignObjectRel implements __getstate__(), so copy and pickle modules
         both use that, but ForeignObject implements __reduce__() and __copy__()
-        separately, so doesn't share the same behaviour.
+        separately, so doesn't share the same behavior.
         """
         foreign_object_rel = Membership._meta.get_field("person").remote_field
         # Trigger storage of cached_property into ForeignObjectRel's __dict__.
@@ -689,3 +805,33 @@ class TestCachedPathInfo(TestCase):
         foreign_object_restored = pickle.loads(pickle.dumps(foreign_object))
         self.assertIn("path_infos", foreign_object_restored.__dict__)
         self.assertIn("reverse_path_infos", foreign_object_restored.__dict__)
+
+
+class ForeignObjectModelValidationTests(TestCase):
+    @skipUnlessDBFeature("supports_table_check_constraints")
+    def test_validate_constraints_with_foreign_object(self):
+        customer_tab = CustomerTab(customer_id=1500)
+        with self.assertRaisesMessage(ValidationError, "customer_id_limit"):
+            customer_tab.validate_constraints()
+
+    @skipUnlessDBFeature("supports_table_check_constraints")
+    def test_validate_constraints_success_case_single_query(self):
+        customer_tab = CustomerTab(customer_id=500)
+        with CaptureQueriesContext(connection) as ctx:
+            customer_tab.validate_constraints()
+        select_queries = [
+            query["sql"]
+            for query in ctx.captured_queries
+            if "select" in query["sql"].lower()
+        ]
+        self.assertEqual(len(select_queries), 1)
+
+    @skipUnlessDBFeature("supports_table_check_constraints")
+    def test_validate_constraints_excluding_foreign_object(self):
+        customer_tab = CustomerTab(customer_id=150)
+        customer_tab.validate_constraints(exclude={"customer"})
+
+    @skipUnlessDBFeature("supports_table_check_constraints")
+    def test_validate_constraints_excluding_foreign_object_member(self):
+        customer_tab = CustomerTab(customer_id=150)
+        customer_tab.validate_constraints(exclude={"customer_id"})

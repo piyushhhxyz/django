@@ -20,13 +20,16 @@ from .models import (
 )
 
 try:
-    from psycopg2.extras import DateRange, DateTimeTZRange, NumericRange
-
     from django.contrib.postgres import fields as pg_fields
     from django.contrib.postgres import forms as pg_forms
     from django.contrib.postgres.validators import (
         RangeMaxValueValidator,
         RangeMinValueValidator,
+    )
+    from django.db.backends.postgresql.psycopg_any import (
+        DateRange,
+        DateTimeTZRange,
+        NumericRange,
     )
 except ImportError:
     pass
@@ -301,6 +304,25 @@ class TestQuerying(PostgreSQLTestCase):
             [self.objs[0]],
         )
 
+    def test_decimal_contains_range(self):
+        decimals = RangesModel.objects.bulk_create(
+            [
+                RangesModel(decimals=NumericRange(None, 10)),
+                RangesModel(decimals=NumericRange(10, None)),
+                RangesModel(decimals=NumericRange(5, 15)),
+                RangesModel(decimals=NumericRange(5, 15, "(]")),
+            ]
+        )
+        for contains, objs in [
+            (199, [decimals[1]]),
+            (1, [decimals[0]]),
+            (15, [decimals[1], decimals[3]]),
+        ]:
+            with self.subTest(decimal_contains=contains):
+                self.assertSequenceEqual(
+                    RangesModel.objects.filter(decimals__contains=contains), objs
+                )
+
     def test_contained_by(self):
         self.assertSequenceEqual(
             RangesModel.objects.filter(ints__contained_by=NumericRange(0, 20)),
@@ -563,8 +585,8 @@ class TestSerialization(PostgreSQLSimpleTestCase):
 
     lower_date = datetime.date(2014, 1, 1)
     upper_date = datetime.date(2014, 2, 2)
-    lower_dt = datetime.datetime(2014, 1, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
-    upper_dt = datetime.datetime(2014, 2, 2, 12, 12, 12, tzinfo=datetime.timezone.utc)
+    lower_dt = datetime.datetime(2014, 1, 1, 0, 0, 0, tzinfo=datetime.UTC)
+    upper_dt = datetime.datetime(2014, 2, 2, 12, 12, 12, tzinfo=datetime.UTC)
 
     def test_dumping(self):
         instance = RangesModel(
@@ -631,7 +653,7 @@ class TestValidators(PostgreSQLSimpleTestCase):
     def test_max(self):
         validator = RangeMaxValueValidator(5)
         validator(NumericRange(0, 5))
-        msg = "Ensure that this range is completely less than or equal to 5."
+        msg = "Ensure that the upper bound of the range is not greater than 5."
         with self.assertRaises(exceptions.ValidationError) as cm:
             validator(NumericRange(0, 10))
         self.assertEqual(cm.exception.messages[0], msg)
@@ -642,7 +664,7 @@ class TestValidators(PostgreSQLSimpleTestCase):
     def test_min(self):
         validator = RangeMinValueValidator(5)
         validator(NumericRange(10, 15))
-        msg = "Ensure that this range is completely greater than or equal to 5."
+        msg = "Ensure that the lower bound of the range is not less than 5."
         with self.assertRaises(exceptions.ValidationError) as cm:
             validator(NumericRange(0, 10))
         self.assertEqual(cm.exception.messages[0], msg)
@@ -687,17 +709,15 @@ class TestFormField(PostgreSQLSimpleTestCase):
         self.assertHTMLEqual(
             str(form),
             """
-            <tr>
-                <th>
-                <label>Field:</label>
-                </th>
-                <td>
+            <div>
+                <fieldset>
+                    <legend>Field:</legend>
                     <input id="id_field_0_0" name="field_0_0" type="text">
                     <input id="id_field_0_1" name="field_0_1" type="text">
                     <input id="id_field_1_0" name="field_1_0" type="text">
                     <input id="id_field_1_1" name="field_1_1" type="text">
-                </td>
-            </tr>
+                </fieldset>
+            </div>
         """,
         )
         form = SplitForm(
@@ -788,13 +808,13 @@ class TestFormField(PostgreSQLSimpleTestCase):
         self.assertHTMLEqual(
             str(RangeForm()),
             """
-        <tr>
-            <th><label>Ints:</label></th>
-            <td>
+        <div>
+            <fieldset>
+                <legend>Ints:</legend>
                 <input id="id_ints_0" name="ints_0" type="number">
                 <input id="id_ints_1" name="ints_1" type="number">
-            </td>
-        </tr>
+            </fieldset>
+        </div>
         """,
         )
 
@@ -822,21 +842,21 @@ class TestFormField(PostgreSQLSimpleTestCase):
 
     def test_integer_invalid_lower(self):
         field = pg_forms.IntegerRangeField()
-        with self.assertRaises(exceptions.ValidationError) as cm:
+        msg = "Enter a whole number."
+        with self.assertRaisesMessage(exceptions.ValidationError, msg):
             field.clean(["a", "2"])
-        self.assertEqual(cm.exception.messages[0], "Enter a whole number.")
 
     def test_integer_invalid_upper(self):
         field = pg_forms.IntegerRangeField()
-        with self.assertRaises(exceptions.ValidationError) as cm:
+        msg = "Enter a whole number."
+        with self.assertRaisesMessage(exceptions.ValidationError, msg):
             field.clean(["1", "b"])
-        self.assertEqual(cm.exception.messages[0], "Enter a whole number.")
 
     def test_integer_required(self):
         field = pg_forms.IntegerRangeField(required=True)
-        with self.assertRaises(exceptions.ValidationError) as cm:
+        msg = "This field is required."
+        with self.assertRaisesMessage(exceptions.ValidationError, msg):
             field.clean(["", ""])
-        self.assertEqual(cm.exception.messages[0], "This field is required.")
         value = field.clean([1, ""])
         self.assertEqual(value, NumericRange(1, None))
 
@@ -864,21 +884,21 @@ class TestFormField(PostgreSQLSimpleTestCase):
 
     def test_decimal_invalid_lower(self):
         field = pg_forms.DecimalRangeField()
-        with self.assertRaises(exceptions.ValidationError) as cm:
+        msg = "Enter a number."
+        with self.assertRaisesMessage(exceptions.ValidationError, msg):
             field.clean(["a", "3.1415926"])
-        self.assertEqual(cm.exception.messages[0], "Enter a number.")
 
     def test_decimal_invalid_upper(self):
         field = pg_forms.DecimalRangeField()
-        with self.assertRaises(exceptions.ValidationError) as cm:
+        msg = "Enter a number."
+        with self.assertRaisesMessage(exceptions.ValidationError, msg):
             field.clean(["1.61803399", "b"])
-        self.assertEqual(cm.exception.messages[0], "Enter a number.")
 
     def test_decimal_required(self):
         field = pg_forms.DecimalRangeField(required=True)
-        with self.assertRaises(exceptions.ValidationError) as cm:
+        msg = "This field is required."
+        with self.assertRaisesMessage(exceptions.ValidationError, msg):
             field.clean(["", ""])
-        self.assertEqual(cm.exception.messages[0], "This field is required.")
         value = field.clean(["1.61803399", ""])
         self.assertEqual(value, NumericRange(Decimal("1.61803399"), None))
 
@@ -906,21 +926,21 @@ class TestFormField(PostgreSQLSimpleTestCase):
 
     def test_date_invalid_lower(self):
         field = pg_forms.DateRangeField()
-        with self.assertRaises(exceptions.ValidationError) as cm:
+        msg = "Enter a valid date."
+        with self.assertRaisesMessage(exceptions.ValidationError, msg):
             field.clean(["a", "2013-04-09"])
-        self.assertEqual(cm.exception.messages[0], "Enter a valid date.")
 
     def test_date_invalid_upper(self):
         field = pg_forms.DateRangeField()
-        with self.assertRaises(exceptions.ValidationError) as cm:
+        msg = "Enter a valid date."
+        with self.assertRaisesMessage(exceptions.ValidationError, msg):
             field.clean(["2013-04-09", "b"])
-        self.assertEqual(cm.exception.messages[0], "Enter a valid date.")
 
     def test_date_required(self):
         field = pg_forms.DateRangeField(required=True)
-        with self.assertRaises(exceptions.ValidationError) as cm:
+        msg = "This field is required."
+        with self.assertRaisesMessage(exceptions.ValidationError, msg):
             field.clean(["", ""])
-        self.assertEqual(cm.exception.messages[0], "This field is required.")
         value = field.clean(["1976-04-16", ""])
         self.assertEqual(value, DateRange(datetime.date(1976, 4, 16), None))
 
@@ -966,21 +986,21 @@ class TestFormField(PostgreSQLSimpleTestCase):
 
     def test_datetime_invalid_lower(self):
         field = pg_forms.DateTimeRangeField()
-        with self.assertRaises(exceptions.ValidationError) as cm:
+        msg = "Enter a valid date/time."
+        with self.assertRaisesMessage(exceptions.ValidationError, msg):
             field.clean(["45", "2013-04-09 11:45"])
-        self.assertEqual(cm.exception.messages[0], "Enter a valid date/time.")
 
     def test_datetime_invalid_upper(self):
         field = pg_forms.DateTimeRangeField()
-        with self.assertRaises(exceptions.ValidationError) as cm:
+        msg = "Enter a valid date/time."
+        with self.assertRaisesMessage(exceptions.ValidationError, msg):
             field.clean(["2013-04-09 11:45", "sweet pickles"])
-        self.assertEqual(cm.exception.messages[0], "Enter a valid date/time.")
 
     def test_datetime_required(self):
         field = pg_forms.DateTimeRangeField(required=True)
-        with self.assertRaises(exceptions.ValidationError) as cm:
+        msg = "This field is required."
+        with self.assertRaisesMessage(exceptions.ValidationError, msg):
             field.clean(["", ""])
-        self.assertEqual(cm.exception.messages[0], "This field is required.")
         value = field.clean(["2013-04-09 11:45", ""])
         self.assertEqual(
             value, DateTimeTZRange(datetime.datetime(2013, 4, 9, 11, 45), None)
@@ -991,7 +1011,7 @@ class TestFormField(PostgreSQLSimpleTestCase):
         field = pg_forms.DateTimeRangeField()
         value = field.prepare_value(
             DateTimeTZRange(
-                datetime.datetime(2015, 5, 22, 16, 6, 33, tzinfo=datetime.timezone.utc),
+                datetime.datetime(2015, 5, 22, 16, 6, 33, tzinfo=datetime.UTC),
                 None,
             )
         )

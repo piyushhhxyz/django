@@ -1,8 +1,7 @@
 from datetime import datetime
 
 from django.contrib.sitemaps import GenericSitemap
-from django.test import ignore_warnings, override_settings
-from django.utils.deprecation import RemovedInDjango50Warning
+from django.test import override_settings
 
 from .base import SitemapTestsBase
 from .models import TestModel
@@ -46,7 +45,7 @@ class GenericViewsSitemapTests(SitemapTestsBase):
             "%s\n"
             "</urlset>"
         ) % expected
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
 
     def test_generic_sitemap_lastmod(self):
         test_model = TestModel.objects.first()
@@ -62,7 +61,7 @@ class GenericViewsSitemapTests(SitemapTestsBase):
             self.base_url,
             test_model.pk,
         )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
         self.assertEqual(
             response.headers["Last-Modified"], "Wed, 13 Mar 2013 10:00:00 GMT"
         )
@@ -79,20 +78,9 @@ class GenericViewsSitemapTests(SitemapTestsBase):
             with self.subTest(protocol=protocol):
                 self.assertEqual(sitemap.get_protocol(protocol), protocol)
 
-    @ignore_warnings(category=RemovedInDjango50Warning)
     def test_get_protocol_default(self):
         sitemap = GenericSitemap({"queryset": None})
-        self.assertEqual(sitemap.get_protocol(), "http")
-
-    def test_get_protocol_default_warning(self):
-        sitemap = GenericSitemap({"queryset": None})
-        msg = (
-            "The default sitemap protocol will be changed from 'http' to "
-            "'https' in Django 5.0. Set Sitemap.protocol to silence this "
-            "warning."
-        )
-        with self.assertWarnsMessage(RemovedInDjango50Warning, msg):
-            sitemap.get_protocol()
+        self.assertEqual(sitemap.get_protocol(), "https")
 
     def test_generic_sitemap_index(self):
         TestModel.objects.update(lastmod=datetime(2013, 3, 13, 10, 0, 0))
@@ -101,4 +89,4 @@ class GenericViewsSitemapTests(SitemapTestsBase):
 <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 <sitemap><loc>http://example.com/simple/sitemap-generic.xml</loc><lastmod>2013-03-13T10:00:00</lastmod></sitemap>
 </sitemapindex>"""
-        self.assertXMLEqual(response.content.decode("utf-8"), expected_content)
+        self.assertXMLEqual(response.text, expected_content)

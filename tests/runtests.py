@@ -11,7 +11,6 @@ import subprocess
 import sys
 import tempfile
 import warnings
-from functools import partial
 from pathlib import Path
 
 try:
@@ -26,11 +25,14 @@ else:
     from django.core.exceptions import ImproperlyConfigured
     from django.db import connection, connections
     from django.test import TestCase, TransactionTestCase
-    from django.test.runner import _init_worker, get_max_test_processes, parallel_type
-    from django.test.selenium import SeleniumTestCaseBase
+    from django.test.runner import get_max_test_processes, parallel_type
+    from django.test.selenium import SeleniumTestCase, SeleniumTestCaseBase
     from django.test.utils import NullTimeKeeper, TimeKeeper, get_runner
-    from django.utils.deprecation import RemovedInDjango50Warning
+    from django.utils.deprecation import RemovedInDjango70Warning
+    from django.utils.functional import classproperty
     from django.utils.log import DEFAULT_LOGGING
+    from django.utils.version import PYPY
+
 
 try:
     import MySQLdb
@@ -41,35 +43,27 @@ else:
     warnings.filterwarnings("ignore", r"\(1003, *", category=MySQLdb.Warning)
 
 # Make deprecation warnings errors to ensure no usage of deprecated features.
-warnings.simplefilter("error", RemovedInDjango50Warning)
+warnings.simplefilter("error", RemovedInDjango70Warning)
 # Make resource and runtime warning errors to ensure no usage of error prone
 # patterns.
 warnings.simplefilter("error", ResourceWarning)
 warnings.simplefilter("error", RuntimeWarning)
-# Ignore known warnings in test dependencies.
-warnings.filterwarnings(
-    "ignore", "'U' mode is deprecated", DeprecationWarning, module="docutils.io"
-)
 
 # Reduce garbage collection frequency to improve performance. Since CPython
 # uses refcounting, garbage collection only collects objects with cyclic
 # references, which are a minority, so the garbage collection threshold can be
 # larger than the default threshold of 700 allocations + deallocations without
 # much increase in memory usage.
-gc.set_threshold(100_000)
+if not PYPY:
+    gc.set_threshold(100_000)
 
 RUNTESTS_DIR = os.path.abspath(os.path.dirname(__file__))
 
 TEMPLATE_DIR = os.path.join(RUNTESTS_DIR, "templates")
 
-# Create a specific subdirectory for the duration of the test suite.
-TMPDIR = tempfile.mkdtemp(prefix="django_")
-# Set the TMPDIR environment variable in addition to tempfile.tempdir
-# so that children processes inherit it.
-tempfile.tempdir = os.environ["TMPDIR"] = TMPDIR
-
-# Removing the temporary TMPDIR.
-atexit.register(shutil.rmtree, TMPDIR)
+# Add variables enabling coverage to trace code in subprocesses.
+os.environ["RUNTESTS_DIR"] = RUNTESTS_DIR
+os.environ["COVERAGE_PROCESS_START"] = os.path.join(RUNTESTS_DIR, ".coveragerc")
 
 
 # This is a dict mapping RUNTESTS_DIR subdirectory to subdirectories of that
@@ -194,6 +188,7 @@ def get_filtered_test_modules(start_at, start_after, gis_enabled, test_labels=No
 
 
 def setup_collect_tests(start_at, start_after, test_labels=None):
+    TMPDIR = os.environ["TMPDIR"]
     state = {
         "INSTALLED_APPS": settings.INSTALLED_APPS,
         "ROOT_URLCONF": getattr(settings, "ROOT_URLCONF", ""),
@@ -216,7 +211,6 @@ def setup_collect_tests(start_at, start_after, test_labels=None):
             "APP_DIRS": True,
             "OPTIONS": {
                 "context_processors": [
-                    "django.template.context_processors.debug",
                     "django.template.context_processors.request",
                     "django.contrib.auth.context_processors.auth",
                     "django.contrib.messages.context_processors.messages",
@@ -241,6 +235,7 @@ def setup_collect_tests(start_at, start_after, test_labels=None):
     settings.LOGGING = log_config
     settings.SILENCED_SYSTEM_CHECKS = [
         "fields.W342",  # ForeignKey(unique=True) -> OneToOneField
+        "postgres.E005",  # django.contrib.postgres must be installed to use feature.
     ]
 
     # Load all the ALWAYS_INSTALLED_APPS.
@@ -303,12 +298,12 @@ def setup_run_tests(verbosity, start_at, start_after, test_labels=None):
     apps.set_installed_apps(settings.INSTALLED_APPS)
 
     # Force declaring available_apps in TransactionTestCase for faster tests.
-    def no_available_apps(self):
+    def no_available_apps(cls):
         raise Exception(
             "Please define available_apps in TransactionTestCase and its subclasses."
         )
 
-    TransactionTestCase.available_apps = property(no_available_apps)
+    TransactionTestCase.available_apps = classproperty(no_available_apps)
     TestCase.available_apps = None
 
     # Set an environment variable that other code may consult to see if
@@ -321,13 +316,6 @@ def setup_run_tests(verbosity, start_at, start_after, test_labels=None):
 
 def teardown_run_tests(state):
     teardown_collect_tests(state)
-    # Discard the multiprocessing.util finalizer that tries to remove a
-    # temporary directory that's already removed by this script's
-    # atexit.register(shutil.rmtree, TMPDIR) handler. Prevents
-    # FileNotFoundError at the end of a test run (#27890).
-    from multiprocessing.util import _finalizer_registry
-
-    _finalizer_registry.pop((-100, 0), None)
     del os.environ["RUNNING_DJANGOS_TEST_SUITE"]
 
 
@@ -370,6 +358,7 @@ def django_tests(
     buffer,
     timing,
     shuffle,
+    durations=None,
 ):
     if parallel in {0, "auto"}:
         max_parallel = get_max_test_processes()
@@ -398,11 +387,8 @@ def django_tests(
             parallel = 1
 
     TestRunner = get_runner(settings)
-    TestRunner.parallel_test_suite.init_worker = partial(
-        _init_worker,
-        process_setup=setup_run_tests,
-        process_setup_args=process_setup_args,
-    )
+    TestRunner.parallel_test_suite.process_setup = setup_run_tests
+    TestRunner.parallel_test_suite.process_setup_args = process_setup_args
     test_runner = TestRunner(
         verbosity=verbosity,
         interactive=interactive,
@@ -418,6 +404,7 @@ def django_tests(
         buffer=buffer,
         timing=timing,
         shuffle=shuffle,
+        durations=durations,
     )
     failures = test_runner.run_tests(test_labels)
     teardown_run_tests(state)
@@ -529,6 +516,14 @@ def paired_tests(paired_test, options, test_labels, start_at, start_after):
 
 
 if __name__ == "__main__":
+    # Create a specific subdirectory for the duration of the test suite.
+    TMPDIR = tempfile.mkdtemp(prefix="django_")
+    # Set the TMPDIR environment variable in addition to tempfile.tempdir
+    # so that children processes inherit it.
+    tempfile.tempdir = os.environ["TMPDIR"] = TMPDIR
+    # Remove the temporary TMPDIR.
+    atexit.register(shutil.rmtree, TMPDIR)
+
     parser = argparse.ArgumentParser(description="Run the Django test suite.")
     parser.add_argument(
         "modules",
@@ -598,6 +593,11 @@ if __name__ == "__main__":
         action=ActionSelenium,
         metavar="BROWSERS",
         help="A comma-separated list of browsers to run the Selenium tests against.",
+    )
+    parser.add_argument(
+        "--screenshots",
+        action="store_true",
+        help="Take screenshots during selenium tests to capture the user interface.",
     )
     parser.add_argument(
         "--headless",
@@ -681,6 +681,14 @@ if __name__ == "__main__":
             "Same as unittest -k option. Can be used multiple times."
         ),
     )
+    parser.add_argument(
+        "--durations",
+        dest="durations",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Show the N slowest test cases (N=0 for all).",
+    )
 
     options = parser.parse_args()
 
@@ -691,8 +699,13 @@ if __name__ == "__main__":
         )
     if using_selenium_hub and not options.external_host:
         parser.error("--selenium-hub and --external-host must be used together.")
+    if options.screenshots and not options.selenium:
+        parser.error("--screenshots require --selenium to be used.")
+    if options.screenshots and options.tags:
+        parser.error("--screenshots and --tag are mutually exclusive.")
 
-    # Allow including a trailing slash on app_labels for tab completion convenience
+    # Allow including a trailing slash on app_labels for tab completion
+    # convenience
     options.modules = [os.path.normpath(labels) for labels in options.modules]
 
     mutually_exclusive_options = [
@@ -726,7 +739,10 @@ if __name__ == "__main__":
         options.settings = os.environ["DJANGO_SETTINGS_MODULE"]
 
     if options.selenium:
-        if multiprocessing.get_start_method() == "spawn" and options.parallel != 1:
+        if (
+            multiprocessing.get_start_method() in {"spawn", "forkserver"}
+            and options.parallel != 1
+        ):
             parser.error(
                 "You cannot use --selenium with parallel tests on this system. "
                 "Pass --parallel=1 to use --selenium."
@@ -740,6 +756,9 @@ if __name__ == "__main__":
             SeleniumTestCaseBase.external_host = options.external_host
         SeleniumTestCaseBase.headless = options.headless
         SeleniumTestCaseBase.browsers = options.selenium
+        if options.screenshots:
+            options.tags = ["screenshot"]
+            SeleniumTestCase.screenshots = options.screenshots
 
     if options.bisect:
         bisect_tests(
@@ -771,13 +790,14 @@ if __name__ == "__main__":
                 options.parallel,
                 options.tags,
                 options.exclude_tags,
-                getattr(options, "test_name_patterns", None),
+                options.test_name_patterns,
                 options.start_at,
                 options.start_after,
                 options.pdb,
                 options.buffer,
                 options.timing,
                 options.shuffle,
+                getattr(options, "durations", None),
             )
         time_keeper.print_results()
         if failures:

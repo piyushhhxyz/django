@@ -1,11 +1,33 @@
 import operator
+from datetime import datetime
 
 from django.db import DatabaseError, NotSupportedError, connection
-from django.db.models import Exists, F, IntegerField, OuterRef, Subquery, Value
+from django.db.models import (
+    DateTimeField,
+    Exists,
+    F,
+    IntegerField,
+    OuterRef,
+    Subquery,
+    Transform,
+    Value,
+)
+from django.db.models.functions import Cast, Mod
 from django.test import TestCase, skipIfDBFeature, skipUnlessDBFeature
 from django.test.utils import CaptureQueriesContext
 
-from .models import Author, Celebrity, ExtraInfo, Number, ReservedName
+from .models import (
+    Annotation,
+    Article,
+    Author,
+    Celebrity,
+    ExtraInfo,
+    Note,
+    Number,
+    Report,
+    ReservedName,
+    Tag,
+)
 
 
 @skipUnlessDBFeature("supports_select_union")
@@ -15,7 +37,7 @@ class QuerySetSetOperationTests(TestCase):
         Number.objects.bulk_create(Number(num=i, other_num=10 - i) for i in range(10))
 
     def assertNumbersEqual(self, queryset, expected_numbers, ordered=True):
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             queryset, expected_numbers, operator.attrgetter("num"), ordered
         )
 
@@ -60,6 +82,99 @@ class QuerySetSetOperationTests(TestCase):
         qs3 = qs1.union(qs2)
         self.assertSequenceEqual(qs3.none(), [])
         self.assertNumbersEqual(qs3, [0, 1, 8, 9], ordered=False)
+
+    def test_union_none_slice(self):
+        qs1 = Number.objects.filter(num__lte=0)
+        qs2 = Number.objects.none()
+        qs3 = qs1.union(qs2)
+        self.assertNumbersEqual(qs3[:1], [0])
+
+    def test_union_empty_slice(self):
+        qs = Number.objects.union()
+        self.assertNumbersEqual(qs[:1], [0])
+        qs = Number.objects.union(all=True)
+        self.assertNumbersEqual(qs[:1], [0])
+        self.assertNumbersEqual(qs.order_by("num")[0:], list(range(0, 10)))
+
+    def test_union_all_none_slice(self):
+        qs = Number.objects.filter(id__in=[])
+        with self.assertNumQueries(0):
+            self.assertSequenceEqual(qs.union(qs), [])
+            self.assertSequenceEqual(qs.union(qs)[0:0], [])
+
+    def test_union_empty_filter_slice(self):
+        qs1 = Number.objects.filter(num__lte=0)
+        qs2 = Number.objects.filter(pk__in=[])
+        qs3 = qs1.union(qs2)
+        self.assertNumbersEqual(qs3[:1], [0])
+
+    @skipUnlessDBFeature("supports_slicing_ordering_in_compound")
+    def test_union_slice_compound_empty(self):
+        qs1 = Number.objects.filter(num__lte=0)[:1]
+        qs2 = Number.objects.none()
+        qs3 = qs1.union(qs2)
+        self.assertNumbersEqual(qs3[:1], [0])
+
+    @skipUnlessDBFeature("supports_slicing_ordering_in_compound")
+    def test_union_combined_slice_compound_empty(self):
+        qs1 = Number.objects.filter(num__lte=2)[:3]
+        qs2 = Number.objects.none()
+        qs3 = qs1.union(qs2)
+        self.assertNumbersEqual(qs3.order_by("num")[2:3], [2])
+
+    def test_union_slice_index(self):
+        Celebrity.objects.create(name="Famous")
+        c1 = Celebrity.objects.create(name="Very famous")
+
+        qs1 = Celebrity.objects.filter(name="nonexistent")
+        qs2 = Celebrity.objects.all()
+        combined_qs = qs1.union(qs2).order_by("name")
+        self.assertEqual(combined_qs[1], c1)
+
+    def test_union_order_with_null_first_last(self):
+        Number.objects.filter(other_num=5).update(other_num=None)
+        qs1 = Number.objects.filter(num__lte=1)
+        qs2 = Number.objects.filter(num__gte=2)
+        qs3 = qs1.union(qs2)
+        self.assertSequenceEqual(
+            qs3.order_by(
+                F("other_num").asc(nulls_first=True),
+            ).values_list("other_num", flat=True),
+            [None, 1, 2, 3, 4, 6, 7, 8, 9, 10],
+        )
+        self.assertSequenceEqual(
+            qs3.order_by(
+                F("other_num").asc(nulls_last=True),
+            ).values_list("other_num", flat=True),
+            [1, 2, 3, 4, 6, 7, 8, 9, 10, None],
+        )
+
+    def test_union_nested(self):
+        qs1 = Number.objects.all()
+        qs2 = qs1.union(qs1)
+        self.assertNumbersEqual(
+            qs1.union(qs2),
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+            ordered=False,
+        )
+
+    def test_union_with_different_models(self):
+        Celebrity.objects.create(name="Angel")
+        Celebrity.objects.create(name="Lionel")
+        Celebrity.objects.create(name="Emiliano")
+        Celebrity.objects.create(name="Demetrio")
+        Report.objects.create(name="Demetrio")
+        Report.objects.create(name="Daniel")
+        Report.objects.create(name="Javier")
+        expected = {"Angel", "Lionel", "Emiliano", "Demetrio", "Daniel", "Javier"}
+        qs1 = Celebrity.objects.values(alias=F("name"))
+        qs2 = Report.objects.values(alias_author=F("name"))
+        qs3 = qs1.union(qs2).values("name")
+        self.assertCountEqual((e["name"] for e in qs3), expected)
+        qs4 = qs1.union(qs2)
+        self.assertCountEqual((e["alias"] for e in qs4), expected)
+        qs5 = qs2.union(qs1)
+        self.assertCountEqual((e["alias_author"] for e in qs5), expected)
 
     @skipUnlessDBFeature("supports_select_intersection")
     def test_intersection_with_empty_qs(self):
@@ -127,7 +242,7 @@ class QuerySetSetOperationTests(TestCase):
     def test_ordering_by_alias(self):
         qs1 = Number.objects.filter(num__lte=1).values(alias=F("num"))
         qs2 = Number.objects.filter(num__gte=2, num__lte=3).values(alias=F("num"))
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             qs1.union(qs2).order_by("-alias"),
             [3, 2, 1, 0],
             operator.itemgetter("alias"),
@@ -141,13 +256,13 @@ class QuerySetSetOperationTests(TestCase):
     def test_ordering_by_f_expression_and_alias(self):
         qs1 = Number.objects.filter(num__lte=1).values(alias=F("other_num"))
         qs2 = Number.objects.filter(num__gte=2, num__lte=3).values(alias=F("other_num"))
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             qs1.union(qs2).order_by(F("alias").desc()),
             [10, 9, 8, 7],
             operator.itemgetter("alias"),
         )
         Number.objects.create(num=-1)
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             qs1.union(qs2).order_by(F("alias").desc(nulls_last=True)),
             [10, 9, 8, 7, None],
             operator.itemgetter("alias"),
@@ -184,7 +299,24 @@ class QuerySetSetOperationTests(TestCase):
             )
             .values_list("num", "count")
         )
-        self.assertCountEqual(qs1.union(qs2), [(1, 0), (2, 1)])
+        self.assertCountEqual(qs1.union(qs2), [(1, 0), (1, 2)])
+
+    def test_union_with_field_and_annotation_values(self):
+        qs1 = (
+            Number.objects.filter(num=1)
+            .annotate(
+                zero=Value(0, IntegerField()),
+            )
+            .values_list("num", "zero")
+        )
+        qs2 = (
+            Number.objects.filter(num=2)
+            .annotate(
+                zero=Value(0, IntegerField()),
+            )
+            .values_list("zero", "num")
+        )
+        self.assertCountEqual(qs1.union(qs2), [(1, 0), (0, 2)])
 
     def test_union_with_extra_and_values_list(self):
         qs1 = (
@@ -249,7 +381,7 @@ class QuerySetSetOperationTests(TestCase):
             qs1.union(qs2).order_by("annotation", "num").values_list("num", flat=True),
             [6, 7, 8, 9, 0, 1, 2, 3, 4, 5],
         )
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             qs1.union(qs2)
             .order_by(
                 F("annotation") * F("multiplier"),
@@ -259,6 +391,60 @@ class QuerySetSetOperationTests(TestCase):
             [6, 7, 8, 9, 0, 1, 2, 3, 4, 5],
             operator.itemgetter("num"),
         )
+
+    def test_order_by_annotation_transform(self):
+        class Mod2(Mod, Transform):
+            def __init__(self, expr):
+                super().__init__(expr, 2)
+
+        output_field = IntegerField()
+        output_field.register_lookup(Mod2, "mod2")
+        qs1 = Number.objects.annotate(
+            annotation=Value(1, output_field=output_field),
+        )
+        qs2 = Number.objects.annotate(
+            annotation=Value(2, output_field=output_field),
+        )
+        msg = "Ordering combined queries by transforms is not implemented."
+        with self.assertRaisesMessage(NotImplementedError, msg):
+            list(qs1.union(qs2).order_by("annotation__mod2"))
+
+    def test_union_with_select_related_and_order(self):
+        e1 = ExtraInfo.objects.create(value=7, info="e1")
+        a1 = Author.objects.create(name="a1", num=1, extra=e1)
+        a2 = Author.objects.create(name="a2", num=3, extra=e1)
+        Author.objects.create(name="a3", num=2, extra=e1)
+        base_qs = Author.objects.select_related("extra").order_by()
+        qs1 = base_qs.filter(name="a1")
+        qs2 = base_qs.filter(name="a2")
+        self.assertSequenceEqual(qs1.union(qs2).order_by("pk"), [a1, a2])
+
+    @skipUnlessDBFeature("supports_slicing_ordering_in_compound")
+    def test_union_with_select_related_and_first(self):
+        e1 = ExtraInfo.objects.create(value=7, info="e1")
+        a1 = Author.objects.create(name="a1", num=1, extra=e1)
+        Author.objects.create(name="a2", num=3, extra=e1)
+        base_qs = Author.objects.select_related("extra").order_by()
+        qs1 = base_qs.filter(name="a1")
+        qs2 = base_qs.filter(name="a2")
+        self.assertEqual(qs1.union(qs2).order_by("name").first(), a1)
+
+    def test_union_with_first(self):
+        e1 = ExtraInfo.objects.create(value=7, info="e1")
+        a1 = Author.objects.create(name="a1", num=1, extra=e1)
+        base_qs = Author.objects.order_by()
+        qs1 = base_qs.filter(name="a1")
+        qs2 = base_qs.filter(name="a2")
+        self.assertEqual(qs1.union(qs2).first(), a1)
+
+    @skipUnlessDBFeature("supports_slicing_ordering_in_compound")
+    def test_union_applies_default_ordering_afterward(self):
+        c = Tag.objects.create(name="C")
+        Tag.objects.create(name="B")
+        a = Tag.objects.create(name="A")
+        qs1 = Tag.objects.filter(name__in=["A", "B"])[:1]
+        qs2 = Tag.objects.filter(name__in=["C"])[:1]
+        self.assertSequenceEqual(qs1.union(qs2), [a, c])
 
     def test_union_multiple_models_with_values_list_and_order(self):
         reserved_name = ReservedName.objects.create(name="rn1", order=0)
@@ -278,6 +464,53 @@ class QuerySetSetOperationTests(TestCase):
             [reserved_name.pk],
         )
 
+    def test_union_multiple_models_with_values_list_and_annotations(self):
+        ReservedName.objects.create(name="rn1", order=10)
+        Celebrity.objects.create(name="c1")
+        qs1 = ReservedName.objects.annotate(row_type=Value("rn")).values_list(
+            "name", "order", "row_type"
+        )
+        qs2 = Celebrity.objects.annotate(
+            row_type=Value("cb"), order=Value(-10)
+        ).values_list("name", "order", "row_type")
+        self.assertSequenceEqual(
+            qs1.union(qs2).order_by("order"),
+            [("c1", -10, "cb"), ("rn1", 10, "rn")],
+        )
+
+    def test_union_multiple_models_with_values_list_and_datetime_annotations(self):
+        gen_x = datetime(1966, 6, 6)
+        Article.objects.create(name="Bellatrix", created=gen_x)
+        column_names = ["name", "created", "order"]
+        qs1 = Article.objects.annotate(order=Value(1)).values_list(*column_names)
+
+        gen_y = datetime(1991, 10, 10)
+        ReservedName.objects.create(name="Rigel", order=2)
+        qs2 = ReservedName.objects.annotate(
+            created=Cast(Value(gen_y), DateTimeField())
+        ).values_list(*column_names)
+
+        expected_result = [("Bellatrix", gen_x, 1), ("Rigel", gen_y, 2)]
+        self.assertEqual(list(qs1.union(qs2).order_by("order")), expected_result)
+
+    def test_union_multiple_models_with_values_and_datetime_annotations(self):
+        gen_x = datetime(1966, 6, 6)
+        Article.objects.create(name="Bellatrix", created=gen_x)
+        column_names = ["name", "created", "order"]
+        qs1 = Article.objects.values(*column_names, order=Value(1))
+
+        gen_y = datetime(1991, 10, 10)
+        ReservedName.objects.create(name="Rigel", order=2)
+        qs2 = ReservedName.objects.values(
+            *column_names, created=Cast(Value(gen_y), DateTimeField())
+        )
+
+        expected_result = [
+            {"name": "Bellatrix", "created": gen_x, "order": 1},
+            {"name": "Rigel", "created": gen_y, "order": 2},
+        ]
+        self.assertEqual(list(qs1.union(qs2).order_by("order")), expected_result)
+
     def test_union_in_subquery(self):
         ReservedName.objects.bulk_create(
             [
@@ -296,6 +529,22 @@ class QuerySetSetOperationTests(TestCase):
             .values_list("order", flat=True),
             [8, 1],
         )
+
+    @skipUnlessDBFeature("supports_select_intersection")
+    def test_intersection_in_nested_subquery(self):
+        tag = Tag.objects.create(name="tag")
+        note = Note.objects.create(tag=tag)
+        annotation = Annotation.objects.create(tag=tag)
+        tags = Tag.objects.order_by()
+        tags = tags.filter(id=OuterRef("tag_id")).intersection(
+            tags.filter(id=OuterRef(OuterRef("tag_id")))
+        )
+        qs = Note.objects.filter(
+            Exists(Annotation.objects.filter(Exists(tags), notes=OuterRef("pk")))
+        )
+        self.assertIsNone(qs.first())
+        annotation.notes.add(note)
+        self.assertEqual(qs.first(), note)
 
     def test_union_in_subquery_related_outerref(self):
         e1 = ExtraInfo.objects.create(value=7, info="e3")
@@ -321,6 +570,28 @@ class QuerySetSetOperationTests(TestCase):
         # Combined queries don't mutate.
         self.assertCountEqual(qs, ["a1", "a2"])
 
+    @skipUnlessDBFeature("supports_slicing_ordering_in_compound")
+    def test_union_in_with_ordering(self):
+        qs1 = Number.objects.filter(num__gt=7).order_by("num")
+        qs2 = Number.objects.filter(num__lt=2).order_by("num")
+        self.assertNumbersEqual(
+            Number.objects.exclude(id__in=qs1.union(qs2).values("id")),
+            [2, 3, 4, 5, 6, 7],
+            ordered=False,
+        )
+
+    @skipUnlessDBFeature(
+        "supports_slicing_ordering_in_compound", "allow_sliced_subqueries_with_in"
+    )
+    def test_union_in_with_ordering_and_slice(self):
+        qs1 = Number.objects.filter(num__gt=7).order_by("num")[:1]
+        qs2 = Number.objects.filter(num__lt=2).order_by("-num")[:1]
+        self.assertNumbersEqual(
+            Number.objects.exclude(id__in=qs1.union(qs2).values("id")),
+            [0, 2, 3, 4, 5, 6, 7, 9],
+            ordered=False,
+        )
+
     def test_count_union(self):
         qs1 = Number.objects.filter(num__lte=1).values("num")
         qs2 = Number.objects.filter(num__gte=2, num__lte=3).values("num")
@@ -329,6 +600,21 @@ class QuerySetSetOperationTests(TestCase):
     def test_count_union_empty_result(self):
         qs = Number.objects.filter(pk__in=[])
         self.assertEqual(qs.union(qs).count(), 0)
+
+    def test_count_union_with_select_related(self):
+        e1 = ExtraInfo.objects.create(value=1, info="e1")
+        Author.objects.create(name="a1", num=1, extra=e1)
+        qs = Author.objects.select_related("extra").order_by()
+        self.assertEqual(qs.union(qs).count(), 1)
+
+    @skipUnlessDBFeature("supports_slicing_ordering_in_compound")
+    def test_count_union_with_select_related_in_values(self):
+        e1 = ExtraInfo.objects.create(value=1, info="e1")
+        a1 = Author.objects.create(name="a1", num=1, extra=e1)
+        qs = Author.objects.select_related("extra").values("pk", "name", "extra__value")
+        self.assertCountEqual(
+            qs.union(qs), [{"pk": a1.id, "name": "a1", "extra__value": 1}]
+        )
 
     @skipUnlessDBFeature("supports_select_difference")
     def test_count_difference(self):
@@ -355,8 +641,7 @@ class QuerySetSetOperationTests(TestCase):
             captured_sql,
         )
         self.assertEqual(
-            captured_sql.count(connection.ops.limit_offset_sql(None, 1)),
-            3 if connection.features.supports_slicing_ordering_in_compound else 1,
+            captured_sql.count(connection.ops.limit_offset_sql(None, 1)), 1
         )
 
     def test_exists_union_empty_result(self):

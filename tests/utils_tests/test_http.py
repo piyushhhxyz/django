@@ -1,17 +1,21 @@
 import platform
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest import mock
 
 from django.test import SimpleTestCase
 from django.utils.datastructures import MultiValueDict
 from django.utils.http import (
+    MAX_HEADER_LENGTH,
+    MAX_URL_LENGTH,
     base36_to_int,
+    content_disposition_header,
     escape_leading_slashes,
     http_date,
     int_to_base36,
     is_same_domain,
     parse_etags,
+    parse_header_parameters,
     parse_http_date,
     quote_etag,
     url_has_allowed_host_and_scheme,
@@ -32,18 +36,7 @@ class URLEncodeTests(SimpleTestCase):
 
     def test_dict(self):
         result = urlencode({"a": 1, "b": 2, "c": 3})
-        # Dictionaries are treated as unordered.
-        self.assertIn(
-            result,
-            [
-                "a=1&b=2&c=3",
-                "a=1&c=3&b=2",
-                "b=2&a=1&c=3",
-                "b=2&c=3&a=1",
-                "c=3&a=1&b=2",
-                "c=3&b=2&a=1",
-            ],
-        )
+        self.assertEqual(result, "a=1&b=2&c=3")
 
     def test_dict_containing_sequence_not_doseq(self):
         self.assertEqual(urlencode({"a": [1, 2]}, doseq=False), "a=%5B1%2C+2%5D")
@@ -77,14 +70,7 @@ class URLEncodeTests(SimpleTestCase):
             ),
             doseq=True,
         )
-        # MultiValueDicts are similarly unordered.
-        self.assertIn(
-            result,
-            [
-                "name=Adrian&name=Simon&position=Developer",
-                "position=Developer&name=Adrian&name=Simon",
-            ],
-        )
+        self.assertEqual(result, "name=Adrian&name=Simon&position=Developer")
 
     def test_dict_with_bytes_values(self):
         self.assertEqual(urlencode({"a": b"abc"}, doseq=True), "a=abc")
@@ -176,6 +162,7 @@ class URLHasAllowedHostAndSchemeTests(unittest.TestCase):
             r"http:/\example.com",
             'javascript:alert("XSS")',
             "\njavascript:alert(x)",
+            "java\nscript:alert(x)",
             "\x08//example.com",
             r"http://otherserver\@example.com",
             r"http:\\testserver\@example.com",
@@ -288,6 +275,21 @@ class URLHasAllowedHostAndSchemeTests(unittest.TestCase):
                     False,
                 )
 
+    def test_max_url_length(self):
+        allowed_host = "example.com"
+        max_extra_characters = "é" * (MAX_URL_LENGTH - len(allowed_host) - 1)
+        max_length_boundary_url = f"{allowed_host}/{max_extra_characters}"
+        cases = [
+            (max_length_boundary_url, True),
+            (max_length_boundary_url + "ú", False),
+        ]
+        for url, expected in cases:
+            with self.subTest(url=url):
+                self.assertIs(
+                    url_has_allowed_host_and_scheme(url, allowed_hosts={allowed_host}),
+                    expected,
+                )
+
 
 class URLSafeBase64Tests(unittest.TestCase):
     def test_roundtrip(self):
@@ -327,7 +329,7 @@ class ETagProcessingTests(unittest.TestCase):
         )
         self.assertEqual(parse_etags("*"), ["*"])
 
-        # Ignore RFC 2616 ETags that are invalid according to RFC 7232.
+        # Ignore RFC 2616 ETags that are invalid according to RFC 9110.
         self.assertEqual(parse_etags(r'"etag", "e\"t\"ag"'), ['"etag"'])
 
     def test_quoting(self):
@@ -344,62 +346,61 @@ class HttpDateProcessingTests(unittest.TestCase):
     def test_parsing_rfc1123(self):
         parsed = parse_http_date("Sun, 06 Nov 1994 08:49:37 GMT")
         self.assertEqual(
-            datetime.fromtimestamp(parsed, timezone.utc),
-            datetime(1994, 11, 6, 8, 49, 37, tzinfo=timezone.utc),
+            datetime.fromtimestamp(parsed, UTC),
+            datetime(1994, 11, 6, 8, 49, 37, tzinfo=UTC),
         )
 
     @unittest.skipIf(platform.architecture()[0] == "32bit", "The Year 2038 problem.")
-    @mock.patch("django.utils.http.datetime.datetime")
+    @mock.patch("django.utils.http.datetime")
     def test_parsing_rfc850(self, mocked_datetime):
         mocked_datetime.side_effect = datetime
-        mocked_datetime.now = mock.Mock()
-        now_1 = datetime(2019, 11, 6, 8, 49, 37, tzinfo=timezone.utc)
-        now_2 = datetime(2020, 11, 6, 8, 49, 37, tzinfo=timezone.utc)
-        now_3 = datetime(2048, 11, 6, 8, 49, 37, tzinfo=timezone.utc)
+        now_1 = datetime(2019, 11, 6, 8, 49, 37, tzinfo=UTC)
+        now_2 = datetime(2020, 11, 6, 8, 49, 37, tzinfo=UTC)
+        now_3 = datetime(2048, 11, 6, 8, 49, 37, tzinfo=UTC)
         tests = (
             (
                 now_1,
                 "Tuesday, 31-Dec-69 08:49:37 GMT",
-                datetime(2069, 12, 31, 8, 49, 37, tzinfo=timezone.utc),
+                datetime(2069, 12, 31, 8, 49, 37, tzinfo=UTC),
             ),
             (
                 now_1,
                 "Tuesday, 10-Nov-70 08:49:37 GMT",
-                datetime(1970, 11, 10, 8, 49, 37, tzinfo=timezone.utc),
+                datetime(1970, 11, 10, 8, 49, 37, tzinfo=UTC),
             ),
             (
                 now_1,
                 "Sunday, 06-Nov-94 08:49:37 GMT",
-                datetime(1994, 11, 6, 8, 49, 37, tzinfo=timezone.utc),
+                datetime(1994, 11, 6, 8, 49, 37, tzinfo=UTC),
             ),
             (
                 now_2,
                 "Wednesday, 31-Dec-70 08:49:37 GMT",
-                datetime(2070, 12, 31, 8, 49, 37, tzinfo=timezone.utc),
+                datetime(2070, 12, 31, 8, 49, 37, tzinfo=UTC),
             ),
             (
                 now_2,
                 "Friday, 31-Dec-71 08:49:37 GMT",
-                datetime(1971, 12, 31, 8, 49, 37, tzinfo=timezone.utc),
+                datetime(1971, 12, 31, 8, 49, 37, tzinfo=UTC),
             ),
             (
                 now_3,
                 "Sunday, 31-Dec-00 08:49:37 GMT",
-                datetime(2000, 12, 31, 8, 49, 37, tzinfo=timezone.utc),
+                datetime(2000, 12, 31, 8, 49, 37, tzinfo=UTC),
             ),
             (
                 now_3,
                 "Friday, 31-Dec-99 08:49:37 GMT",
-                datetime(1999, 12, 31, 8, 49, 37, tzinfo=timezone.utc),
+                datetime(1999, 12, 31, 8, 49, 37, tzinfo=UTC),
             ),
         )
         for now, rfc850str, expected_date in tests:
             with self.subTest(rfc850str=rfc850str):
                 mocked_datetime.now.return_value = now
                 parsed = parse_http_date(rfc850str)
-                mocked_datetime.now.assert_called_once_with(tz=timezone.utc)
+                mocked_datetime.now.assert_called_once_with(tz=UTC)
                 self.assertEqual(
-                    datetime.fromtimestamp(parsed, timezone.utc),
+                    datetime.fromtimestamp(parsed, UTC),
                     expected_date,
                 )
             mocked_datetime.reset_mock()
@@ -407,8 +408,8 @@ class HttpDateProcessingTests(unittest.TestCase):
     def test_parsing_asctime(self):
         parsed = parse_http_date("Sun Nov  6 08:49:37 1994")
         self.assertEqual(
-            datetime.fromtimestamp(parsed, timezone.utc),
-            datetime(1994, 11, 6, 8, 49, 37, tzinfo=timezone.utc),
+            datetime.fromtimestamp(parsed, UTC),
+            datetime(1994, 11, 6, 8, 49, 37, tzinfo=UTC),
         )
 
     def test_parsing_asctime_nonascii_digits(self):
@@ -421,8 +422,8 @@ class HttpDateProcessingTests(unittest.TestCase):
     def test_parsing_year_less_than_70(self):
         parsed = parse_http_date("Sun Nov  6 08:49:37 0037")
         self.assertEqual(
-            datetime.fromtimestamp(parsed, timezone.utc),
-            datetime(2037, 11, 6, 8, 49, 37, tzinfo=timezone.utc),
+            datetime.fromtimestamp(parsed, UTC),
+            datetime(2037, 11, 6, 8, 49, 37, tzinfo=UTC),
         )
 
 
@@ -435,3 +436,144 @@ class EscapeLeadingSlashesTests(unittest.TestCase):
         for url, expected in tests:
             with self.subTest(url=url):
                 self.assertEqual(escape_leading_slashes(url), expected)
+
+
+class ParseHeaderParameterTests(unittest.TestCase):
+    def test_basic(self):
+        tests = [
+            ("", ("", {})),
+            (None, ("", {})),
+            ("text/plain", ("text/plain", {})),
+            ("text/vnd.just.made.this.up ; ", ("text/vnd.just.made.this.up", {})),
+            ("text/plain;charset=us-ascii", ("text/plain", {"charset": "us-ascii"})),
+            (
+                'text/plain ; charset="us-ascii"',
+                ("text/plain", {"charset": "us-ascii"}),
+            ),
+            (
+                'text/plain ; charset="us-ascii"; another=opt',
+                ("text/plain", {"charset": "us-ascii", "another": "opt"}),
+            ),
+            (
+                'attachment; filename="silly.txt"',
+                ("attachment", {"filename": "silly.txt"}),
+            ),
+            (
+                'attachment; filename="strange;name"',
+                ("attachment", {"filename": "strange;name"}),
+            ),
+            (
+                'attachment; filename="strange;name";size=123;',
+                ("attachment", {"filename": "strange;name", "size": "123"}),
+            ),
+            (
+                'attachment; filename="strange;name";;;;size=123;;;',
+                ("attachment", {"filename": "strange;name", "size": "123"}),
+            ),
+            (
+                'form-data; name="files"; filename="fo\\"o;bar"',
+                ("form-data", {"name": "files", "filename": 'fo"o;bar'}),
+            ),
+            (
+                'form-data; name="files"; filename="\\"fo\\"o;b\\\\ar\\""',
+                ("form-data", {"name": "files", "filename": '"fo"o;b\\ar"'}),
+            ),
+        ]
+        for header, expected in tests:
+            with self.subTest(header=header):
+                self.assertEqual(parse_header_parameters(header), expected)
+
+    def test_rfc2231_parsing(self):
+        test_data = (
+            (
+                "Content-Type: application/x-stuff; "
+                "title*=us-ascii'en-us'This%20is%20%2A%2A%2Afun%2A%2A%2A",
+                "This is ***fun***",
+            ),
+            (
+                "Content-Type: application/x-stuff; title*=UTF-8''foo-%c3%a4.html",
+                "foo-ä.html",
+            ),
+            (
+                "Content-Type: application/x-stuff; title*=iso-8859-1''foo-%E4.html",
+                "foo-ä.html",
+            ),
+        )
+        for raw_line, expected_title in test_data:
+            parsed = parse_header_parameters(raw_line)
+            self.assertEqual(parsed[1]["title"], expected_title)
+
+    def test_rfc2231_wrong_title(self):
+        """
+        Test wrongly formatted RFC 2231 headers (missing double single quotes).
+        Parsing should not crash (#24209).
+        """
+        test_data = (
+            (
+                "Content-Type: application/x-stuff; "
+                "title*='This%20is%20%2A%2A%2Afun%2A%2A%2A",
+                "'This%20is%20%2A%2A%2Afun%2A%2A%2A",
+            ),
+            ("Content-Type: application/x-stuff; title*='foo.html", "'foo.html"),
+            ("Content-Type: application/x-stuff; title*=bar.html", "bar.html"),
+        )
+        for raw_line, expected_title in test_data:
+            parsed = parse_header_parameters(raw_line)
+            self.assertEqual(parsed[1]["title"], expected_title)
+
+    def test_header_max_length(self):
+        base_header = "Content-Type: application/x-stuff; title*="
+        base_header_len = len(base_header)
+
+        test_data = [
+            (MAX_HEADER_LENGTH, {}),
+            (MAX_HEADER_LENGTH, {"max_length": None}),
+            (MAX_HEADER_LENGTH + 1, {"max_length": None}),
+            (100, {"max_length": 100}),
+        ]
+        for line_length, kwargs in test_data:
+            with self.subTest(line_length=line_length, kwargs=kwargs):
+                title = "x" * (line_length - base_header_len)
+                line = base_header + title
+                assert len(line) == line_length
+
+                parsed = parse_header_parameters(line, **kwargs)
+
+                expected = ("content-type: application/x-stuff", {"title": title})
+                self.assertEqual(parsed, expected)
+
+    def test_header_too_long(self):
+        test_data = [
+            ("x" * (MAX_HEADER_LENGTH + 1), {}),
+            ("x" * 101, {"max_length": 100}),
+        ]
+        for line, kwargs in test_data:
+            with self.subTest(line_length=len(line), kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    parse_header_parameters(line, **kwargs)
+
+
+class ContentDispositionHeaderTests(unittest.TestCase):
+    def test_basic(self):
+        tests = (
+            ((False, None), None),
+            ((False, "example"), 'inline; filename="example"'),
+            ((True, None), "attachment"),
+            ((True, "example"), 'attachment; filename="example"'),
+            (
+                (True, '"example" file\\name'),
+                'attachment; filename="\\"example\\" file\\\\name"',
+            ),
+            ((True, "espécimen"), "attachment; filename*=utf-8''esp%C3%A9cimen"),
+            (
+                (True, '"espécimen" filename'),
+                "attachment; filename*=utf-8''%22esp%C3%A9cimen%22%20filename",
+            ),
+            ((True, "some\nfile"), "attachment; filename*=utf-8''some%0Afile"),
+        )
+
+        for (is_attachment, filename), expected in tests:
+            with self.subTest(is_attachment=is_attachment, filename=filename):
+                self.assertEqual(
+                    content_disposition_header(is_attachment, filename), expected
+                )

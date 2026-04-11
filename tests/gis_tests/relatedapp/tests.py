@@ -1,10 +1,12 @@
-from django.contrib.gis.db.models import Collect, Count, Extent, F, Union
+from django.contrib.gis.db.models import Collect, Count, Extent, F, MakeLine, Q, Union
+from django.contrib.gis.db.models.functions import Centroid
 from django.contrib.gis.geos import GEOSGeometry, MultiPoint, Point
 from django.db import NotSupportedError, connection
 from django.test import TestCase, skipUnlessDBFeature
 from django.test.utils import override_settings
 from django.utils import timezone
 
+from ..utils import skipUnlessGISLookup
 from .models import Article, Author, Book, City, DirectoryEntry, Event, Location, Parcel
 
 
@@ -50,7 +52,8 @@ class RelatedGeoModelTest(TestCase):
         e3 = aggs["location__point__extent"]
 
         # The tolerance value is to four decimal places because of differences
-        # between the Oracle and PostGIS spatial backends on the extent calculation.
+        # between the Oracle and PostGIS spatial backends on the extent
+        # calculation.
         tol = 4
         for ref, e in [(all_extent, e1), (txpa_extent, e2), (all_extent, e3)]:
             for ref_val, e_val in zip(ref, e):
@@ -76,7 +79,7 @@ class RelatedGeoModelTest(TestCase):
         aggs = City.objects.aggregate(Union("location__point"))
 
         # These are the points that are components of the aggregate geographic
-        # union that is returned.  Each point # corresponds to City PK.
+        # union that is returned. Each point # corresponds to City PK.
         p1 = Point(-104.528056, 33.387222)
         p2 = Point(-97.516111, 33.058333)
         p3 = Point(-79.460734, 40.18476)
@@ -84,8 +87,8 @@ class RelatedGeoModelTest(TestCase):
         p5 = Point(-95.363151, 29.763374)
 
         # The second union aggregate is for a union
-        # query that includes limiting information in the WHERE clause (in other
-        # words a `.filter()` precedes the call to `.aggregate(Union()`).
+        # query that includes limiting information in the WHERE clause (in
+        # other words a `.filter()` precedes the call to `.aggregate(Union()`).
         ref_u1 = MultiPoint(p1, p2, p4, p5, p3, srid=4326)
         ref_u2 = MultiPoint(p2, p3, srid=4326)
 
@@ -98,10 +101,15 @@ class RelatedGeoModelTest(TestCase):
         self.assertEqual(type(u3), MultiPoint)
 
         # Ordering of points in the result of the union is not defined and
-        # implementation-dependent (DB backend, GEOS version)
-        self.assertEqual({p.ewkt for p in ref_u1}, {p.ewkt for p in u1})
-        self.assertEqual({p.ewkt for p in ref_u2}, {p.ewkt for p in u2})
-        self.assertEqual({p.ewkt for p in ref_u1}, {p.ewkt for p in u3})
+        # implementation-dependent (DB backend, GEOS version).
+        tests = [
+            (u1, ref_u1),
+            (u2, ref_u2),
+            (u3, ref_u1),
+        ]
+        for union, ref in tests:
+            for point, ref_point in zip(sorted(union), sorted(ref), strict=True):
+                self.assertIs(point.equals_exact(ref_point, tolerance=6), True)
 
     def test05_select_related_fk_to_subclass(self):
         """
@@ -110,6 +118,7 @@ class RelatedGeoModelTest(TestCase):
         # Regression test for #9752.
         list(DirectoryEntry.objects.select_related())
 
+    @skipUnlessGISLookup("within")
     def test06_f_expressions(self):
         "Testing F() expressions on GeometryFields."
         # Constructing a dummy parcel border and getting the City instance for
@@ -132,7 +141,7 @@ class RelatedGeoModelTest(TestCase):
         )
 
         # Now creating a second Parcel where the borders are the same, just
-        # in different coordinate systems.  The center points are also the
+        # in different coordinate systems. The center points are also the
         # same (but in different coordinate systems), and this time they
         # actually correspond to the centroid of the border.
         c1 = b1.centroid
@@ -186,8 +195,8 @@ class RelatedGeoModelTest(TestCase):
         # Incrementing through each of the models, dictionaries, and tuples
         # returned by each QuerySet.
         for m, d, t in zip(gqs, gvqs, gvlqs):
-            # The values should be Geometry objects and not raw strings returned
-            # by the spatial database.
+            # The values should be Geometry objects and not raw strings
+            # returned by the spatial database.
             self.assertIsInstance(d["point"], GEOSGeometry)
             self.assertIsInstance(t[1], GEOSGeometry)
             self.assertEqual(m.point, d["point"])
@@ -201,15 +210,18 @@ class RelatedGeoModelTest(TestCase):
 
     def test08_defer_only(self):
         "Testing defer() and only() on Geographic models."
-        qs = Location.objects.all()
-        def_qs = Location.objects.defer("point")
+        qs = Location.objects.all().order_by("pk")
+        def_qs = Location.objects.defer("point").order_by("pk")
         for loc, def_loc in zip(qs, def_qs):
             self.assertEqual(loc.point, def_loc.point)
 
     def test09_pk_relations(self):
-        "Ensuring correct primary key column is selected across relations. See #10757."
+        """
+        Ensuring correct primary key column is selected across relations. See
+        #10757.
+        """
         # The expected ID values -- notice the last two location IDs
-        # are out of order.  Dallas and Houston have location IDs that differ
+        # are out of order. Dallas and Houston have location IDs that differ
         # from their PKs -- this is done to ensure that the related location
         # ID column is selected instead of ID column for the city.
         city_ids = (1, 2, 3, 4, 5)
@@ -219,6 +231,7 @@ class RelatedGeoModelTest(TestCase):
             self.assertEqual(val_dict["id"], c_id)
             self.assertEqual(val_dict["location__id"], l_id)
 
+    @skipUnlessGISLookup("within")
     def test10_combine(self):
         "Testing the combination of two QuerySets (#10807)."
         buf1 = City.objects.get(name="Aurora").location.point.buffer(0.1)
@@ -261,7 +274,7 @@ class RelatedGeoModelTest(TestCase):
 
     @skipUnlessDBFeature("allows_group_by_lob")
     def test13c_count(self):
-        "Testing `Count` aggregate with `.values()`.  See #15305."
+        "Testing `Count` aggregate with `.values()`. See #15305."
         qs = (
             Location.objects.filter(id=5)
             .annotate(num_cities=Count("city"))
@@ -304,18 +317,137 @@ class RelatedGeoModelTest(TestCase):
         self.assertEqual(4, len(coll))
         self.assertTrue(ref_geom.equals(coll))
 
+    @skipUnlessDBFeature("supports_collect_aggr")
+    def test_collect_filter(self):
+        qs = City.objects.annotate(
+            parcel_center=Collect(
+                "parcel__center1",
+                filter=~Q(parcel__name__icontains="ignore"),
+            ),
+            parcel_center_nonexistent=Collect(
+                "parcel__center1",
+                filter=Q(parcel__name__icontains="nonexistent"),
+            ),
+            parcel_center_single=Collect(
+                "parcel__center1",
+                filter=Q(parcel__name__contains="Alpha"),
+            ),
+        )
+        city = qs.get(name="Aurora")
+        self.assertEqual(
+            city.parcel_center.wkt,
+            GEOSGeometry("MULTIPOINT (1.7128 -2.006, 4.7128 5.006)"),
+        )
+        self.assertIsNone(city.parcel_center_nonexistent)
+        self.assertIn(
+            city.parcel_center_single.wkt,
+            [
+                GEOSGeometry("MULTIPOINT (1.7128 -2.006)"),
+                GEOSGeometry("POINT (1.7128 -2.006)"),  # SpatiaLite collapse to POINT.
+            ],
+        )
+
+    @skipUnlessDBFeature("has_Centroid_function", "supports_collect_aggr")
+    def test_centroid_collect_filter(self):
+        qs = City.objects.annotate(
+            parcel_centroid=Centroid(
+                Collect(
+                    "parcel__center1",
+                    filter=~Q(parcel__name__icontains="ignore"),
+                )
+            )
+        )
+        city = qs.get(name="Aurora")
+        if connection.ops.mariadb:
+            self.assertIsNone(city.parcel_centroid)
+        else:
+            self.assertIsInstance(city.parcel_centroid, Point)
+            self.assertAlmostEqual(city.parcel_centroid[0], 3.2128, 4)
+            self.assertAlmostEqual(city.parcel_centroid[1], 1.5, 4)
+
+    @skipUnlessDBFeature("supports_make_line_aggr")
+    def test_make_line_filter(self):
+        qs = City.objects.annotate(
+            parcel_line=MakeLine(
+                "parcel__center1",
+                filter=~Q(parcel__name__icontains="ignore"),
+            ),
+            parcel_line_nonexistent=MakeLine(
+                "parcel__center1",
+                filter=Q(parcel__name__icontains="nonexistent"),
+            ),
+        )
+        city = qs.get(name="Aurora")
+        self.assertIn(
+            city.parcel_line.wkt,
+            # The default ordering is flaky, so check both.
+            [
+                "LINESTRING (1.7128 -2.006, 4.7128 5.006)",
+                "LINESTRING (4.7128 5.006, 1.7128 -2.006)",
+            ],
+        )
+        self.assertIsNone(city.parcel_line_nonexistent)
+
+    @skipUnlessDBFeature("supports_extent_aggr")
+    def test_extent_filter(self):
+        qs = City.objects.annotate(
+            parcel_border=Extent(
+                "parcel__border1",
+                filter=~Q(parcel__name__icontains="ignore"),
+            ),
+            parcel_border_nonexistent=Extent(
+                "parcel__border1",
+                filter=Q(parcel__name__icontains="nonexistent"),
+            ),
+            parcel_border_no_filter=Extent("parcel__border1"),
+        )
+        city = qs.get(name="Aurora")
+        self.assertEqual(city.parcel_border, (0.0, 0.0, 22.0, 22.0))
+        self.assertIsNone(city.parcel_border_nonexistent)
+        self.assertEqual(city.parcel_border_no_filter, (0.0, 0.0, 32.0, 32.0))
+
+    @skipUnlessDBFeature("supports_union_aggr")
+    def test_union_filter(self):
+        qs = City.objects.annotate(
+            parcel_point_union=Union(
+                "parcel__center2",
+                filter=~Q(parcel__name__icontains="ignore"),
+            ),
+            parcel_point_nonexistent=Union(
+                "parcel__center2",
+                filter=Q(parcel__name__icontains="nonexistent"),
+            ),
+            parcel_point_union_single=Union(
+                "parcel__center2",
+                filter=Q(parcel__name__contains="Alpha"),
+            ),
+        )
+        city = qs.get(name="Aurora")
+        self.assertIn(
+            city.parcel_point_union.wkt,
+            [
+                GEOSGeometry("MULTIPOINT (12.75 10.05, 3.7128 -5.006)"),
+                GEOSGeometry("MULTIPOINT (3.7128 -5.006, 12.75 10.05)"),
+            ],
+        )
+        self.assertIsNone(city.parcel_point_nonexistent)
+        self.assertEqual(city.parcel_point_union_single.wkt, "POINT (3.7128 -5.006)")
+
     def test15_invalid_select_related(self):
         """
         select_related on the related name manager of a unique FK.
         """
         qs = Article.objects.select_related("author__article")
-        # This triggers TypeError when `get_default_columns` has no `local_only`
-        # keyword.  The TypeError is swallowed if QuerySet is actually
-        # evaluated as list generation swallows TypeError in CPython.
+        # This triggers TypeError when `get_default_columns` has no
+        # `local_only` keyword. The TypeError is swallowed if QuerySet is
+        # actually evaluated as list generation swallows TypeError in CPython.
         str(qs.query)
 
     def test16_annotated_date_queryset(self):
-        "Ensure annotated date querysets work if spatial backend is used.  See #14648."
+        """
+        Ensure annotated date querysets work if spatial backend is used.  See
+        #14648.
+        """
         birth_years = [
             dt.year
             for dt in list(

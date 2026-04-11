@@ -1,5 +1,5 @@
-import functools
 import os
+from functools import wraps
 
 from django.template.engine import Engine
 from django.test.utils import override_settings
@@ -9,7 +9,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_DIR = os.path.join(ROOT, "templates")
 
 
-def setup(templates, *args, test_once=False):
+def setup(templates, *args, test_once=False, debug_only=False):
     """
     Runs test method multiple times in the following order:
 
@@ -46,7 +46,7 @@ def setup(templates, *args, test_once=False):
         # Make Engine.get_default() raise an exception to ensure that tests
         # are properly isolated from Django's global settings.
         @override_settings(TEMPLATES=None)
-        @functools.wraps(func)
+        @wraps(func)
         def inner(self):
             # Set up custom template tag libraries if specified
             libraries = getattr(self, "libraries", {})
@@ -54,11 +54,14 @@ def setup(templates, *args, test_once=False):
             self.engine = Engine(
                 libraries=libraries,
                 loaders=loaders,
+                debug=debug_only,
             )
             func(self)
             if test_once:
                 return
             func(self)
+            if debug_only:
+                return
 
             self.engine = Engine(
                 libraries=libraries,

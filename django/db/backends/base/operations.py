@@ -1,13 +1,17 @@
 import datetime
 import decimal
+import json
 from importlib import import_module
+from itertools import chain
 
 import sqlparse
 
 from django.conf import settings
-from django.db import NotSupportedError, transaction
-from django.db.backends import utils
+from django.db import NotSupportedError, models, transaction
+from django.db.models.expressions import Col
+from django.db.models.fields.composite import CompositePrimaryKey
 from django.utils import timezone
+from django.utils.duration import duration_microseconds
 from django.utils.encoding import force_str
 
 
@@ -58,6 +62,9 @@ class BaseDatabaseOperations:
         self.connection = connection
         self._cache = None
 
+    def __del__(self):
+        del self.connection
+
     def autoinc_sql(self, table, column):
         """
         Return any SQL needed to support auto-incrementing primary keys, or
@@ -73,7 +80,17 @@ class BaseDatabaseOperations:
         are the fields going to be inserted in the batch, the objs contains
         all the objects to be inserted.
         """
-        return len(objs)
+        if self.connection.features.max_query_params is None or not fields:
+            return len(objs)
+
+        return self.connection.features.max_query_params // len(
+            list(
+                chain.from_iterable(
+                    field.fields if isinstance(field, CompositePrimaryKey) else [field]
+                    for field in fields
+                )
+            )
+        )
 
     def format_for_duration_arithmetic(self, sql):
         raise NotImplementedError(
@@ -100,7 +117,7 @@ class BaseDatabaseOperations:
         """
         return "%s"
 
-    def date_extract_sql(self, lookup_type, field_name):
+    def date_extract_sql(self, lookup_type, sql, params):
         """
         Given a lookup_type of 'year', 'month', or 'day', return the SQL that
         extracts a value from the given date field field_name.
@@ -110,7 +127,7 @@ class BaseDatabaseOperations:
             "method"
         )
 
-    def date_trunc_sql(self, lookup_type, field_name, tzname=None):
+    def date_trunc_sql(self, lookup_type, sql, params, tzname=None):
         """
         Given a lookup_type of 'year', 'month', or 'day', return the SQL that
         truncates the given date or datetime field field_name to a date object
@@ -124,7 +141,7 @@ class BaseDatabaseOperations:
             "method."
         )
 
-    def datetime_cast_date_sql(self, field_name, tzname):
+    def datetime_cast_date_sql(self, sql, params, tzname):
         """
         Return the SQL to cast a datetime value to date value.
         """
@@ -133,7 +150,7 @@ class BaseDatabaseOperations:
             "datetime_cast_date_sql() method."
         )
 
-    def datetime_cast_time_sql(self, field_name, tzname):
+    def datetime_cast_time_sql(self, sql, params, tzname):
         """
         Return the SQL to cast a datetime value to time value.
         """
@@ -142,7 +159,7 @@ class BaseDatabaseOperations:
             "datetime_cast_time_sql() method"
         )
 
-    def datetime_extract_sql(self, lookup_type, field_name, tzname):
+    def datetime_extract_sql(self, lookup_type, sql, params, tzname):
         """
         Given a lookup_type of 'year', 'month', 'day', 'hour', 'minute', or
         'second', return the SQL that extracts a value from the given
@@ -153,7 +170,7 @@ class BaseDatabaseOperations:
             "method"
         )
 
-    def datetime_trunc_sql(self, lookup_type, field_name, tzname):
+    def datetime_trunc_sql(self, lookup_type, sql, params, tzname):
         """
         Given a lookup_type of 'year', 'month', 'day', 'hour', 'minute', or
         'second', return the SQL that truncates the given datetime field
@@ -164,7 +181,7 @@ class BaseDatabaseOperations:
             "method"
         )
 
-    def time_trunc_sql(self, lookup_type, field_name, tzname=None):
+    def time_trunc_sql(self, lookup_type, sql, params, tzname=None):
         """
         Given a lookup_type of 'hour', 'minute' or 'second', return the SQL
         that truncates the given time or datetime field field_name to a time
@@ -177,12 +194,12 @@ class BaseDatabaseOperations:
             "subclasses of BaseDatabaseOperations may require a time_trunc_sql() method"
         )
 
-    def time_extract_sql(self, lookup_type, field_name):
+    def time_extract_sql(self, lookup_type, sql, params):
         """
         Given a lookup_type of 'hour', 'minute', or 'second', return the SQL
         that extracts a value from the given time field field_name.
         """
-        return self.date_extract_sql(lookup_type, field_name)
+        return self.date_extract_sql(lookup_type, sql, params)
 
     def deferrable_sql(self):
         """
@@ -204,21 +221,12 @@ class BaseDatabaseOperations:
         else:
             return ["DISTINCT"], []
 
-    def fetch_returned_insert_columns(self, cursor, returning_params):
+    def force_group_by(self):
         """
-        Given a cursor object that has just performed an INSERT...RETURNING
-        statement into a table, return the newly created data.
+        Return a GROUP BY clause to use with a HAVING clause when no grouping
+        is specified.
         """
-        return cursor.fetchone()
-
-    def field_cast_sql(self, db_type, internal_type):
-        """
-        Given a column type (e.g. 'BLOB', 'VARCHAR') and an internal type
-        (e.g. 'GenericIPAddressField'), return the SQL to cast it before using
-        it in a WHERE statement. The resulting string should contain a '%s'
-        placeholder for the column being searched against.
-        """
-        return "%s"
+        return []
 
     def force_no_ordering(self):
         """
@@ -258,6 +266,21 @@ class BaseDatabaseOperations:
             if sql
         )
 
+    def fk_on_delete_sql(self, operation):
+        """
+        Return the SQL to make an ON DELETE statement.
+        """
+        if operation in ["CASCADE", "SET NULL", "SET DEFAULT"]:
+            return f" ON DELETE {operation}"
+        if operation == "":
+            return ""
+        raise NotImplementedError(f"ON DELETE {operation} is not supported.")
+
+    def bulk_insert_sql(self, fields, placeholder_rows):
+        placeholder_rows_sql = (", ".join(row) for row in placeholder_rows)
+        values_sql = ", ".join([f"({sql})" for sql in placeholder_rows_sql])
+        return f"VALUES {values_sql}"
+
     def last_executed_query(self, cursor, sql, params):
         """
         Return a string of the query last executed by the given cursor, with
@@ -268,6 +291,7 @@ class BaseDatabaseOperations:
         exists for database backends to provide a better implementation
         according to their own quoting schemes.
         """
+
         # Convert params to contain string values.
         def to_string(s):
             return force_str(s, strings_only=True, errors="replace")
@@ -350,13 +374,31 @@ class BaseDatabaseOperations:
         """
         return value
 
-    def return_insert_columns(self, fields):
+    def returning_columns(self, fields):
         """
-        For backends that support returning columns as part of an insert query,
-        return the SQL and params to append to the INSERT query. The returned
-        fragment should contain a format string to hold the appropriate column.
+        For backends that support returning columns as part of an insert or
+        update query, return the SQL and params to append to the query.
+        The returned fragment should contain a format string to hold the
+        appropriate column.
         """
-        pass
+        if not fields:
+            return "", ()
+        columns = [
+            "%s.%s"
+            % (
+                self.quote_name(field.model._meta.db_table),
+                self.quote_name(field.column),
+            )
+            for field in fields
+        ]
+        return "RETURNING %s" % ", ".join(columns), ()
+
+    def fetch_returned_rows(self, cursor, returning_params):
+        """
+        Given a cursor object for a DML query with a RETURNING statement,
+        return the selected returning rows of tuples.
+        """
+        return cursor.fetchall()
 
     def compiler(self, compiler_name):
         """
@@ -524,6 +566,9 @@ class BaseDatabaseOperations:
         else:
             return value
 
+    def adapt_integerfield_value(self, value, internal_type):
+        return value
+
     def adapt_datefield_value(self, value):
         """
         Transform a date value to an object compatible with what is expected
@@ -535,16 +580,22 @@ class BaseDatabaseOperations:
 
     def adapt_datetimefield_value(self, value):
         """
-        Transform a datetime value to an object compatible with what is expected
-        by the backend driver for datetime columns.
+        Transform a datetime value to an object compatible with what is
+        expected by the backend driver for datetime columns.
         """
         if value is None:
             return None
-        # Expression values are adapted by the database.
-        if hasattr(value, "resolve_expression"):
-            return value
-
         return str(value)
+
+    def adapt_durationfield_value(self, value):
+        """
+        Transform a timedelta value into an object compatible with what is
+        expected by the backend driver for duration columns (by default,
+        an integer of microseconds).
+        """
+        if value is None:
+            return None
+        return duration_microseconds(value)
 
     def adapt_timefield_value(self, value):
         """
@@ -553,10 +604,6 @@ class BaseDatabaseOperations:
         """
         if value is None:
             return None
-        # Expression values are adapted by the database.
-        if hasattr(value, "resolve_expression"):
-            return value
-
         if timezone.is_aware(value):
             raise ValueError("Django does not support timezone-aware times.")
         return str(value)
@@ -566,7 +613,7 @@ class BaseDatabaseOperations:
         Transform a decimal.Decimal value to an object compatible with what is
         expected by the backend driver for decimal (numeric) columns.
         """
-        return utils.format_number(value, max_digits, decimal_places)
+        return value
 
     def adapt_ipaddressfield_value(self, value):
         """
@@ -574,6 +621,9 @@ class BaseDatabaseOperations:
         type for the backend driver.
         """
         return value or None
+
+    def adapt_json_value(self, value, encoder):
+        return json.dumps(value, cls=encoder)
 
     def year_lookup_bounds_for_date_field(self, value, iso_year=False):
         """
@@ -634,6 +684,25 @@ class BaseDatabaseOperations:
         if value is not None:
             return datetime.timedelta(0, 0, value)
 
+    def convert_trunc_expression(self, value, expression):
+        if isinstance(expression.output_field, models.DateTimeField):
+            if not settings.USE_TZ:
+                pass
+            elif value is not None:
+                value = value.replace(tzinfo=None)
+                value = timezone.make_aware(value, expression.tzinfo)
+            elif not self.connection.features.has_zoneinfo_database:
+                raise ValueError(
+                    "Database returned an invalid datetime value. Are time "
+                    "zone definitions for your database installed?"
+                )
+        elif isinstance(value, datetime.datetime):
+            if isinstance(expression.output_field, models.DateField):
+                value = value.date()
+            elif isinstance(expression.output_field, models.TimeField):
+                value = value.time()
+        return value
+
     def check_expression_support(self, expression):
         """
         Check that the backend supports the provided expression.
@@ -665,12 +734,14 @@ class BaseDatabaseOperations:
     def combine_duration_expression(self, connector, sub_expressions):
         return self.combine_expression(connector, sub_expressions)
 
-    def binary_placeholder_sql(self, value):
+    def binary_placeholder_sql(self, value, compiler):
         """
         Some backends require special syntax to insert binary content (MySQL
         for example uses '_binary %s').
         """
-        return "%s"
+        if hasattr(value, "as_sql"):
+            return compiler.compile(value)
+        return "%s", (value,)
 
     def modify_insert_params(self, placeholder, params):
         """
@@ -696,42 +767,50 @@ class BaseDatabaseOperations:
             "This backend does not support %s subtraction." % internal_type
         )
 
-    def window_frame_start(self, start):
-        if isinstance(start, int):
-            if start < 0:
-                return "%d %s" % (abs(start), self.PRECEDING)
-            elif start == 0:
+    def window_frame_value(self, value):
+        if isinstance(value, int):
+            if value == 0:
                 return self.CURRENT_ROW
-        elif start is None:
-            return self.UNBOUNDED_PRECEDING
-        raise ValueError(
-            "start argument must be a negative integer, zero, or None, but got '%s'."
-            % start
-        )
-
-    def window_frame_end(self, end):
-        if isinstance(end, int):
-            if end == 0:
-                return self.CURRENT_ROW
-            elif end > 0:
-                return "%d %s" % (end, self.FOLLOWING)
-        elif end is None:
-            return self.UNBOUNDED_FOLLOWING
-        raise ValueError(
-            "end argument must be a positive integer, zero, or None, but got '%s'."
-            % end
-        )
+            elif value < 0:
+                return "%d %s" % (abs(value), self.PRECEDING)
+            else:
+                return "%d %s" % (value, self.FOLLOWING)
 
     def window_frame_rows_start_end(self, start=None, end=None):
         """
         Return SQL for start and end points in an OVER clause window frame.
         """
-        if not self.connection.features.supports_over_clause:
-            raise NotSupportedError("This backend does not support window expressions.")
-        return self.window_frame_start(start), self.window_frame_end(end)
+        if isinstance(start, int) and isinstance(end, int) and start > end:
+            raise ValueError("start cannot be greater than end.")
+        if start is not None and not isinstance(start, int):
+            raise ValueError(
+                f"start argument must be an integer, zero, or None, but got '{start}'."
+            )
+        if end is not None and not isinstance(end, int):
+            raise ValueError(
+                f"end argument must be an integer, zero, or None, but got '{end}'."
+            )
+        start_ = self.window_frame_value(start) or self.UNBOUNDED_PRECEDING
+        end_ = self.window_frame_value(end) or self.UNBOUNDED_FOLLOWING
+        return start_, end_
 
     def window_frame_range_start_end(self, start=None, end=None):
-        start_, end_ = self.window_frame_rows_start_end(start, end)
+        if (start is not None and not isinstance(start, int)) or (
+            isinstance(start, int) and start > 0
+        ):
+            raise ValueError(
+                "start argument must be a negative integer, zero, or None, "
+                "but got '%s'." % start
+            )
+        if (end is not None and not isinstance(end, int)) or (
+            isinstance(end, int) and end < 0
+        ):
+            raise ValueError(
+                "end argument must be a positive integer, zero, or None, but got '%s'."
+                % end
+            )
+        start_ = self.window_frame_value(start) or self.UNBOUNDED_PRECEDING
+        end_ = self.window_frame_value(end) or self.UNBOUNDED_FOLLOWING
         features = self.connection.features
         if features.only_supports_unbounded_with_preceding_and_following and (
             (start and start < 0) or (end and end > 0)
@@ -768,3 +847,42 @@ class BaseDatabaseOperations:
 
     def on_conflict_suffix_sql(self, fields, on_conflict, update_fields, unique_fields):
         return ""
+
+    def prepare_join_on_clause(self, lhs_table, lhs_field, rhs_table, rhs_field):
+        lhs_expr = Col(lhs_table, lhs_field)
+        rhs_expr = Col(rhs_table, rhs_field)
+
+        return lhs_expr, rhs_expr
+
+    def format_debug_sql(self, sql):
+        # Hook for backends (e.g. NoSQL) to customize formatting.
+        return sqlparse.format(sql, reindent=True, keyword_case="upper")
+
+    def format_json_path_numeric_index(self, num):
+        """
+        Hook for backends to customize array indexing in JSON paths.
+        """
+        return "[%s]" % num
+
+    def compile_json_path(self, key_transforms, include_root=True):
+        """
+        Hook for backends to customize all aspects of JSON path construction.
+        """
+        path = ["$"] if include_root else []
+        for key_transform in key_transforms:
+            try:
+                num = int(key_transform)
+            except ValueError:  # Non-integer.
+                path.append(".")
+                path.append(json.dumps(key_transform))
+            else:
+                if (
+                    num < 0
+                    and not self.connection.features.supports_json_negative_indexing
+                ):
+                    raise NotSupportedError(
+                        "Using negative JSON array indices is not supported on this "
+                        "database backend."
+                    )
+                path.append(self.format_json_path_numeric_index(num))
+        return "".join(path)

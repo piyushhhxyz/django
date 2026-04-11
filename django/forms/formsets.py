@@ -1,12 +1,12 @@
 from django.core.exceptions import ValidationError
-from django.forms import Form
 from django.forms.fields import BooleanField, IntegerField
+from django.forms.forms import Form
 from django.forms.renderers import get_default_renderer
 from django.forms.utils import ErrorList, RenderableFormMixin
 from django.forms.widgets import CheckboxInput, HiddenInput, NumberInput
 from django.utils.functional import cached_property
 from django.utils.translation import gettext_lazy as _
-from django.utils.translation import ngettext
+from django.utils.translation import ngettext_lazy
 
 __all__ = ("BaseFormSet", "formset_factory", "all_valid")
 
@@ -61,8 +61,19 @@ class BaseFormSet(RenderableFormMixin):
             "ManagementForm data is missing or has been tampered with. Missing fields: "
             "%(field_names)s. You may need to file a bug report if the issue persists."
         ),
+        "too_many_forms": ngettext_lazy(
+            "Please submit at most %(num)d form.",
+            "Please submit at most %(num)d forms.",
+            "num",
+        ),
+        "too_few_forms": ngettext_lazy(
+            "Please submit at least %(num)d form.",
+            "Please submit at least %(num)d forms.",
+            "num",
+        ),
     }
 
+    template_name_div = "django/forms/formsets/div.html"
     template_name_p = "django/forms/formsets/p.html"
     template_name_table = "django/forms/formsets/table.html"
     template_name_ul = "django/forms/formsets/ul.html"
@@ -88,6 +99,8 @@ class BaseFormSet(RenderableFormMixin):
         self.error_class = error_class
         self._errors = None
         self._non_form_errors = None
+        self.form_renderer = self.renderer
+        self.renderer = self.renderer or get_default_renderer()
 
         messages = {}
         for cls in reversed(type(self).__mro__):
@@ -213,7 +226,7 @@ class BaseFormSet(RenderableFormMixin):
             # incorrect validation for extra, optional, and deleted
             # forms in the formset.
             "use_required_attribute": False,
-            "renderer": self.renderer,
+            "renderer": self.form_renderer,
         }
         if self.is_bound:
             defaults["data"] = self.data
@@ -244,14 +257,15 @@ class BaseFormSet(RenderableFormMixin):
 
     @property
     def empty_form(self):
-        form = self.form(
-            auto_id=self.auto_id,
-            prefix=self.add_prefix("__prefix__"),
-            empty_permitted=True,
-            use_required_attribute=False,
+        form_kwargs = {
             **self.get_form_kwargs(None),
-            renderer=self.renderer,
-        )
+            "auto_id": self.auto_id,
+            "prefix": self.add_prefix("__prefix__"),
+            "empty_permitted": True,
+            "use_required_attribute": False,
+            "renderer": self.form_renderer,
+        }
+        form = self.form(**form_kwargs)
         self.add_fields(form, None)
         return form
 
@@ -276,7 +290,7 @@ class BaseFormSet(RenderableFormMixin):
         if not hasattr(self, "_deleted_form_indexes"):
             self._deleted_form_indexes = []
             for i, form in enumerate(self.forms):
-                # if this is an extra form and hasn't changed, don't consider it
+                # If this is an extra form and hasn't changed, ignore it.
                 if i >= self.initial_form_count() and not form.has_changed():
                     continue
                 if self._should_delete_form(form):
@@ -293,14 +307,14 @@ class BaseFormSet(RenderableFormMixin):
             raise AttributeError(
                 "'%s' object has no attribute 'ordered_forms'" % self.__class__.__name__
             )
-        # Construct _ordering, which is a list of (form_index, order_field_value)
-        # tuples. After constructing this list, we'll sort it by order_field_value
-        # so we have a way to get to the form indexes in the order specified
-        # by the form data.
+        # Construct _ordering, which is a list of (form_index,
+        # order_field_value) tuples. After constructing this list, we'll sort
+        # it by order_field_value so we have a way to get to the form indexes
+        # in the order specified by the form data.
         if not hasattr(self, "_ordering"):
             self._ordering = []
             for i, form in enumerate(self.forms):
-                # if this is an extra form and hasn't changed, don't consider it
+                # If this is an extra form and hasn't changed, ignore it.
                 if i >= self.initial_form_count() and not form.has_changed():
                     continue
                 # don't add data marked for deletion to self.ordered_data
@@ -424,12 +438,7 @@ class BaseFormSet(RenderableFormMixin):
                 TOTAL_FORM_COUNT
             ] > self.absolute_max:
                 raise ValidationError(
-                    ngettext(
-                        "Please submit at most %d form.",
-                        "Please submit at most %d forms.",
-                        self.max_num,
-                    )
-                    % self.max_num,
+                    self.error_messages["too_many_forms"] % {"num": self.max_num},
                     code="too_many_forms",
                 )
             if (
@@ -440,12 +449,7 @@ class BaseFormSet(RenderableFormMixin):
                 < self.min_num
             ):
                 raise ValidationError(
-                    ngettext(
-                        "Please submit at least %d form.",
-                        "Please submit at least %d forms.",
-                        self.min_num,
-                    )
-                    % self.min_num,
+                    self.error_messages["too_few_forms"] % {"num": self.min_num},
                     code="too_few_forms",
                 )
             # Give self.clean() a chance to do cross-form validation.
@@ -488,7 +492,9 @@ class BaseFormSet(RenderableFormMixin):
                     required=False,
                     widget=self.get_ordering_widget(),
                 )
-        if self.can_delete and (self.can_delete_extra or index < initial_form_count):
+        if self.can_delete and (
+            self.can_delete_extra or (index is not None and index < initial_form_count)
+        ):
             form.fields[DELETION_FIELD_NAME] = BooleanField(
                 label=_("Delete"),
                 required=False,
@@ -562,9 +568,14 @@ def formset_factory(
         "absolute_max": absolute_max,
         "validate_min": validate_min,
         "validate_max": validate_max,
-        "renderer": renderer or get_default_renderer(),
+        "renderer": renderer,
     }
-    return type(form.__name__ + "FormSet", (formset,), attrs)
+    form_name = form.__name__
+    if form_name.endswith("Form"):
+        formset_name = form_name + "Set"
+    else:
+        formset_name = form_name + "FormSet"
+    return type(formset_name, (formset,), attrs)
 
 
 def all_valid(formsets):

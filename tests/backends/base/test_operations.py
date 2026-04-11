@@ -1,19 +1,21 @@
 import decimal
 
 from django.core.management.color import no_style
-from django.db import NotSupportedError, connection, transaction
+from django.db import NotSupportedError, connection, models, transaction
 from django.db.backends.base.operations import BaseDatabaseOperations
-from django.db.models import DurationField, Value
+from django.db.models import DurationField
+from django.db.models.expressions import Col
 from django.test import (
     SimpleTestCase,
     TestCase,
     TransactionTestCase,
     override_settings,
     skipIfDBFeature,
+    skipUnlessDBFeature,
 )
 from django.utils import timezone
 
-from ..models import Author, Book
+from ..models import Author, Book, Person
 
 
 class SimpleDatabaseOperationTests(SimpleTestCase):
@@ -85,16 +87,8 @@ class SimpleDatabaseOperationTests(SimpleTestCase):
     def test_adapt_timefield_value_none(self):
         self.assertIsNone(self.ops.adapt_timefield_value(None))
 
-    def test_adapt_timefield_value_expression(self):
-        value = Value(timezone.now().time())
-        self.assertEqual(self.ops.adapt_timefield_value(value), value)
-
     def test_adapt_datetimefield_value_none(self):
         self.assertIsNone(self.ops.adapt_datetimefield_value(None))
-
-    def test_adapt_datetimefield_value_expression(self):
-        value = Value(timezone.now())
-        self.assertEqual(self.ops.adapt_datetimefield_value(value), value)
 
     def test_adapt_timefield_value(self):
         msg = "Django does not support timezone-aware times."
@@ -115,60 +109,81 @@ class SimpleDatabaseOperationTests(SimpleTestCase):
         with self.assertRaisesMessage(
             NotImplementedError, self.may_require_msg % "date_extract_sql"
         ):
-            self.ops.date_extract_sql(None, None)
+            self.ops.date_extract_sql(None, None, None)
 
     def test_time_extract_sql(self):
         with self.assertRaisesMessage(
             NotImplementedError, self.may_require_msg % "date_extract_sql"
         ):
-            self.ops.time_extract_sql(None, None)
+            self.ops.time_extract_sql(None, None, None)
 
     def test_date_trunc_sql(self):
         with self.assertRaisesMessage(
             NotImplementedError, self.may_require_msg % "date_trunc_sql"
         ):
-            self.ops.date_trunc_sql(None, None)
+            self.ops.date_trunc_sql(None, None, None)
 
     def test_time_trunc_sql(self):
         with self.assertRaisesMessage(
             NotImplementedError, self.may_require_msg % "time_trunc_sql"
         ):
-            self.ops.time_trunc_sql(None, None)
+            self.ops.time_trunc_sql(None, None, None)
 
     def test_datetime_trunc_sql(self):
         with self.assertRaisesMessage(
             NotImplementedError, self.may_require_msg % "datetime_trunc_sql"
         ):
-            self.ops.datetime_trunc_sql(None, None, None)
+            self.ops.datetime_trunc_sql(None, None, None, None)
 
     def test_datetime_cast_date_sql(self):
         with self.assertRaisesMessage(
             NotImplementedError, self.may_require_msg % "datetime_cast_date_sql"
         ):
-            self.ops.datetime_cast_date_sql(None, None)
+            self.ops.datetime_cast_date_sql(None, None, None)
 
     def test_datetime_cast_time_sql(self):
         with self.assertRaisesMessage(
             NotImplementedError, self.may_require_msg % "datetime_cast_time_sql"
         ):
-            self.ops.datetime_cast_time_sql(None, None)
+            self.ops.datetime_cast_time_sql(None, None, None)
 
     def test_datetime_extract_sql(self):
         with self.assertRaisesMessage(
             NotImplementedError, self.may_require_msg % "datetime_extract_sql"
         ):
-            self.ops.datetime_extract_sql(None, None, None)
+            self.ops.datetime_extract_sql(None, None, None, None)
+
+    def test_prepare_join_on_clause(self):
+        author_table = Author._meta.db_table
+        author_id_field = Author._meta.get_field("id")
+        book_table = Book._meta.db_table
+        book_fk_field = Book._meta.get_field("author")
+        lhs_expr, rhs_expr = self.ops.prepare_join_on_clause(
+            author_table,
+            author_id_field,
+            book_table,
+            book_fk_field,
+        )
+        self.assertEqual(lhs_expr, Col(author_table, author_id_field))
+        self.assertEqual(rhs_expr, Col(book_table, book_fk_field))
 
 
 class DatabaseOperationTests(TestCase):
     def setUp(self):
         self.ops = BaseDatabaseOperations(connection=connection)
 
-    @skipIfDBFeature("supports_over_clause")
-    def test_window_frame_raise_not_supported_error(self):
-        msg = "This backend does not support window expressions."
-        with self.assertRaisesMessage(NotSupportedError, msg):
-            self.ops.window_frame_rows_start_end()
+    def test_last_executed_query_base_fallback(self):
+        sql = "INVALID SQL"
+        params = []
+        with connection.cursor() as cursor:
+            cursor.close()
+            try:
+                cursor.execute(sql, params)
+            except connection.features.closed_cursor_error_class:
+                pass
+            self.assertIsNotNone(
+                connection.ops.last_executed_query(cursor, sql, params),
+            )
 
     @skipIfDBFeature("can_distinct_on_fields")
     def test_distinct_on_fields(self):
@@ -186,6 +201,55 @@ class DatabaseOperationTests(TestCase):
         )
         with self.assertRaisesMessage(NotSupportedError, msg):
             self.ops.subtract_temporals(duration_field_internal_type, None, None)
+
+    @skipUnlessDBFeature("max_query_params")
+    def test_bulk_batch_size_limited(self):
+        max_query_params = connection.features.max_query_params
+        objects = range(max_query_params + 1)
+        first_name_field = Person._meta.get_field("first_name")
+        last_name_field = Person._meta.get_field("last_name")
+        composite_pk = models.CompositePrimaryKey("first_name", "last_name")
+        composite_pk.fields = [first_name_field, last_name_field]
+
+        self.assertEqual(connection.ops.bulk_batch_size([], objects), len(objects))
+        self.assertEqual(
+            connection.ops.bulk_batch_size([first_name_field], objects),
+            max_query_params,
+        )
+        self.assertEqual(
+            connection.ops.bulk_batch_size(
+                [first_name_field, last_name_field], objects
+            ),
+            max_query_params // 2,
+        )
+        self.assertEqual(
+            connection.ops.bulk_batch_size([composite_pk, first_name_field], objects),
+            max_query_params // 3,
+        )
+
+    @skipIfDBFeature("max_query_params")
+    def test_bulk_batch_size_unlimited(self):
+        objects = range(2**16 + 1)
+        first_name_field = Person._meta.get_field("first_name")
+        last_name_field = Person._meta.get_field("last_name")
+        composite_pk = models.CompositePrimaryKey("first_name", "last_name")
+        composite_pk.fields = [first_name_field, last_name_field]
+
+        self.assertEqual(connection.ops.bulk_batch_size([], objects), len(objects))
+        self.assertEqual(
+            connection.ops.bulk_batch_size([first_name_field], objects),
+            len(objects),
+        )
+        self.assertEqual(
+            connection.ops.bulk_batch_size(
+                [first_name_field, last_name_field], objects
+            ),
+            len(objects),
+        )
+        self.assertEqual(
+            connection.ops.bulk_batch_size([composite_pk, first_name_field], objects),
+            len(objects),
+        )
 
 
 class SqlFlushTests(TransactionTestCase):

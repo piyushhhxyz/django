@@ -2,6 +2,7 @@ from django.apps import apps
 from django.db import models
 from django.test import SimpleTestCase, override_settings
 from django.test.utils import isolate_lru_cache
+from django.utils.choices import normalize_choices
 
 
 class FieldDeconstructionTests(SimpleTestCase):
@@ -96,6 +97,31 @@ class FieldDeconstructionTests(SimpleTestCase):
         self.assertEqual(
             kwargs, {"choices": [("A", "One"), ("B", "Two")], "max_length": 1}
         )
+
+    def test_choices_iterator(self):
+        field = models.IntegerField(choices=((i, str(i)) for i in range(3)))
+        name, path, args, kwargs = field.deconstruct()
+        self.assertEqual(path, "django.db.models.IntegerField")
+        self.assertEqual(args, [])
+        self.assertEqual(kwargs, {"choices": [(0, "0"), (1, "1"), (2, "2")]})
+
+    def test_choices_iterable(self):
+        # Pass an iterable (but not an iterator) to choices.
+        field = models.IntegerField(choices="012345")
+        name, path, args, kwargs = field.deconstruct()
+        self.assertEqual(path, "django.db.models.IntegerField")
+        self.assertEqual(args, [])
+        self.assertEqual(kwargs, {"choices": normalize_choices("012345")})
+
+    def test_choices_callable(self):
+        def get_choices():
+            return [(i, str(i)) for i in range(3)]
+
+        field = models.IntegerField(choices=get_choices)
+        name, path, args, kwargs = field.deconstruct()
+        self.assertEqual(path, "django.db.models.IntegerField")
+        self.assertEqual(args, [])
+        self.assertEqual(kwargs, {"choices": get_choices})
 
     def test_csi_field(self):
         field = models.CommaSeparatedIntegerField(max_length=100)
@@ -307,7 +333,8 @@ class FieldDeconstructionTests(SimpleTestCase):
     def test_foreign_key_swapped(self):
         with isolate_lru_cache(apps.get_swappable_settings_name):
             # It doesn't matter that we swapped out user for permission;
-            # there's no validation. We just want to check the setting stuff works.
+            # there's no validation. We just want to check the setting stuff
+            # works.
             field = models.ForeignKey("auth.Permission", models.CASCADE)
             name, path, args, kwargs = field.deconstruct()
 
@@ -490,6 +517,23 @@ class FieldDeconstructionTests(SimpleTestCase):
         self.assertEqual(path, "django.db.models.ManyToManyField")
         self.assertEqual(args, [])
         self.assertEqual(kwargs, {"to": "auth.permission", "through": "auth.Group"})
+        # Test through_fields
+        field = models.ManyToManyField(
+            "auth.Permission",
+            through="auth.Group",
+            through_fields=("foo", "permissions"),
+        )
+        name, path, args, kwargs = field.deconstruct()
+        self.assertEqual(path, "django.db.models.ManyToManyField")
+        self.assertEqual(args, [])
+        self.assertEqual(
+            kwargs,
+            {
+                "to": "auth.permission",
+                "through": "auth.Group",
+                "through_fields": ("foo", "permissions"),
+            },
+        )
         # Test custom db_table
         field = models.ManyToManyField("auth.Permission", db_table="custom_table")
         name, path, args, kwargs = field.deconstruct()
@@ -527,7 +571,8 @@ class FieldDeconstructionTests(SimpleTestCase):
     def test_many_to_many_field_swapped(self):
         with isolate_lru_cache(apps.get_swappable_settings_name):
             # It doesn't matter that we swapped out user for permission;
-            # there's no validation. We just want to check the setting stuff works.
+            # there's no validation. We just want to check the setting stuff
+            # works.
             field = models.ManyToManyField("auth.Permission")
             name, path, args, kwargs = field.deconstruct()
 

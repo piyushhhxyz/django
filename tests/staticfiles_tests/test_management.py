@@ -9,7 +9,7 @@ from unittest import mock
 
 from admin_scripts.tests import AdminScriptTestCase
 
-from django.conf import settings
+from django.conf import STATICFILES_STORAGE_ALIAS, settings
 from django.contrib.staticfiles import storage
 from django.contrib.staticfiles.management.commands import collectstatic, runserver
 from django.core.exceptions import ImproperlyConfigured
@@ -124,6 +124,11 @@ class TestFindStatic(TestDefaults, CollectionTestCase):
             searched_locations,
         )
 
+    def test_missing_args_message(self):
+        msg = "Enter at least one staticfile."
+        with self.assertRaisesMessage(CommandError, msg):
+            call_command("findstatic")
+
 
 class TestConfiguration(StaticFilesTestCase):
     def test_location_empty(self):
@@ -141,16 +146,26 @@ class TestConfiguration(StaticFilesTestCase):
         try:
             storage.staticfiles_storage._wrapped = empty
             with self.settings(
-                STATICFILES_STORAGE=(
-                    "django.contrib.staticfiles.storage.StaticFilesStorage"
-                )
+                STORAGES={
+                    **settings.STORAGES,
+                    STATICFILES_STORAGE_ALIAS: {
+                        "BACKEND": (
+                            "django.contrib.staticfiles.storage.StaticFilesStorage"
+                        )
+                    },
+                }
             ):
                 command = collectstatic.Command()
                 self.assertTrue(command.is_local_storage())
 
             storage.staticfiles_storage._wrapped = empty
             with self.settings(
-                STATICFILES_STORAGE="staticfiles_tests.storage.DummyStorage"
+                STORAGES={
+                    **settings.STORAGES,
+                    STATICFILES_STORAGE_ALIAS: {
+                        "BACKEND": "staticfiles_tests.storage.DummyStorage"
+                    },
+                }
             ):
                 command = collectstatic.Command()
                 self.assertFalse(command.is_local_storage())
@@ -241,9 +256,14 @@ class TestCollectionVerbosity(CollectionTestCase):
         self.assertIn(self.copying_msg, output)
 
     @override_settings(
-        STATICFILES_STORAGE=(
-            "django.contrib.staticfiles.storage.ManifestStaticFilesStorage"
-        )
+        STORAGES={
+            **settings.STORAGES,
+            STATICFILES_STORAGE_ALIAS: {
+                "BACKEND": (
+                    "django.contrib.staticfiles.storage.ManifestStaticFilesStorage"
+                )
+            },
+        }
     )
     def test_verbosity_1_with_post_process(self):
         stdout = StringIO()
@@ -251,9 +271,14 @@ class TestCollectionVerbosity(CollectionTestCase):
         self.assertNotIn(self.post_process_msg, stdout.getvalue())
 
     @override_settings(
-        STATICFILES_STORAGE=(
-            "django.contrib.staticfiles.storage.ManifestStaticFilesStorage"
-        )
+        STORAGES={
+            **settings.STORAGES,
+            STATICFILES_STORAGE_ALIAS: {
+                "BACKEND": (
+                    "django.contrib.staticfiles.storage.ManifestStaticFilesStorage"
+                )
+            },
+        }
     )
     def test_verbosity_2_with_post_process(self):
         stdout = StringIO()
@@ -266,11 +291,13 @@ class TestCollectionClear(CollectionTestCase):
     Test the ``--clear`` option of the ``collectstatic`` management command.
     """
 
+    run_collectstatic_in_setUp = False
+
     def run_collectstatic(self, **kwargs):
         clear_filepath = os.path.join(settings.STATIC_ROOT, "cleared.txt")
         with open(clear_filepath, "w") as f:
             f.write("should be cleared")
-        super().run_collectstatic(clear=True)
+        super().run_collectstatic(clear=True, **kwargs)
 
     def test_cleared_not_found(self):
         self.assertFileNotFound("cleared.txt")
@@ -280,11 +307,49 @@ class TestCollectionClear(CollectionTestCase):
         super().run_collectstatic(clear=True)
 
     @override_settings(
-        STATICFILES_STORAGE="staticfiles_tests.storage.PathNotImplementedStorage"
+        STORAGES={
+            **settings.STORAGES,
+            STATICFILES_STORAGE_ALIAS: {
+                "BACKEND": "staticfiles_tests.storage.PathNotImplementedStorage"
+            },
+        }
     )
     def test_handle_path_notimplemented(self):
         self.run_collectstatic()
         self.assertFileNotFound("cleared.txt")
+
+    def test_verbosity_0(self):
+        for kwargs in [{}, {"dry_run": True}]:
+            with self.subTest(kwargs=kwargs):
+                stdout = StringIO()
+                self.run_collectstatic(verbosity=0, stdout=stdout, **kwargs)
+                self.assertEqual(stdout.getvalue(), "")
+
+    def test_verbosity_1(self):
+        for deletion_message, kwargs in [
+            ("Deleting", {}),
+            ("Pretending to delete", {"dry_run": True}),
+        ]:
+            with self.subTest(kwargs=kwargs):
+                stdout = StringIO()
+                self.run_collectstatic(verbosity=1, stdout=stdout, **kwargs)
+                output = stdout.getvalue()
+                self.assertIn("static file", output)
+                self.assertIn("deleted", output)
+                self.assertNotIn(deletion_message, output)
+
+    def test_verbosity_2(self):
+        for deletion_message, kwargs in [
+            ("Deleting", {}),
+            ("Pretending to delete", {"dry_run": True}),
+        ]:
+            with self.subTest(kwargs=kwargs):
+                stdout = StringIO()
+                self.run_collectstatic(verbosity=2, stdout=stdout, **kwargs)
+                output = stdout.getvalue()
+                self.assertIn("static file", output)
+                self.assertIn("deleted", output)
+                self.assertIn(deletion_message, output)
 
 
 class TestInteractiveMessages(CollectionTestCase):
@@ -395,7 +460,12 @@ class TestCollectionDryRun(TestNoFilesCreated, CollectionTestCase):
 
 
 @override_settings(
-    STATICFILES_STORAGE="django.contrib.staticfiles.storage.ManifestStaticFilesStorage"
+    STORAGES={
+        **settings.STORAGES,
+        STATICFILES_STORAGE_ALIAS: {
+            "BACKEND": "django.contrib.staticfiles.storage.ManifestStaticFilesStorage"
+        },
+    }
 )
 class TestCollectionDryRunManifestStaticFilesStorage(TestCollectionDryRun):
     pass
@@ -404,8 +474,8 @@ class TestCollectionDryRunManifestStaticFilesStorage(TestCollectionDryRun):
 class TestCollectionFilesOverride(CollectionTestCase):
     """
     Test overriding duplicated files by ``collectstatic`` management command.
-    Check for proper handling of apps order in installed apps even if file modification
-    dates are in different order:
+    Check for proper handling of apps order in installed apps even if file
+    modification dates are in different order:
         'staticfiles_test_app',
         'staticfiles_tests.apps.no_label',
     """
@@ -422,9 +492,9 @@ class TestCollectionFilesOverride(CollectionTestCase):
         self.orig_atime = os.path.getatime(self.orig_path)
 
         # prepare duplicate of file2.txt from a temporary app
-        # this file will have modification time older than no_label/static/file2.txt
-        # anyway it should be taken to STATIC_ROOT because the temporary app is before
-        # 'no_label' app in installed apps
+        # this file will have modification time older than
+        # no_label/static/file2.txt anyway it should be taken to STATIC_ROOT
+        # because the temporary app is before 'no_label' app in installed apps
         self.temp_app_path = os.path.join(self.temp_dir, "staticfiles_test_app")
         self.testfile_path = os.path.join(self.temp_app_path, "static", "file2.txt")
 
@@ -438,17 +508,13 @@ class TestCollectionFilesOverride(CollectionTestCase):
 
         os.utime(self.testfile_path, (self.orig_atime - 1, self.orig_mtime - 1))
 
-        self.settings_with_test_app = self.modify_settings(
+        settings_with_test_app = self.modify_settings(
             INSTALLED_APPS={"prepend": "staticfiles_test_app"},
         )
         with extend_sys_path(self.temp_dir):
-            self.settings_with_test_app.enable()
-
+            settings_with_test_app.enable()
+        self.addCleanup(settings_with_test_app.disable)
         super().setUp()
-
-    def tearDown(self):
-        super().tearDown()
-        self.settings_with_test_app.disable()
 
     def test_ordering_override(self):
         """
@@ -477,15 +543,17 @@ class TestCollectionOverwriteWarning(CollectionTestCase):
     # looking for was emitted.
     warning_string = "Found another file"
 
-    def _collectstatic_output(self, **kwargs):
+    def _collectstatic_output(self, verbosity=3, **kwargs):
         """
-        Run collectstatic, and capture and return the output. We want to run
-        the command at highest verbosity, which is why we can't
-        just call e.g. BaseCollectionTestCase.run_collectstatic()
+        Run collectstatic, and capture and return the output.
         """
         out = StringIO()
         call_command(
-            "collectstatic", interactive=False, verbosity=3, stdout=out, **kwargs
+            "collectstatic",
+            interactive=False,
+            verbosity=verbosity,
+            stdout=out,
+            **kwargs,
         )
         return out.getvalue()
 
@@ -496,9 +564,10 @@ class TestCollectionOverwriteWarning(CollectionTestCase):
         output = self._collectstatic_output(clear=True)
         self.assertNotIn(self.warning_string, output)
 
-    def test_warning(self):
+    def test_warning_at_verbosity_2(self):
         """
-        There is a warning when there are duplicate destinations.
+        There is a warning when there are duplicate destinations at verbosity
+        2+.
         """
         with tempfile.TemporaryDirectory() as static_dir:
             duplicate = os.path.join(static_dir, "test", "file.txt")
@@ -507,18 +576,52 @@ class TestCollectionOverwriteWarning(CollectionTestCase):
                 f.write("duplicate of file.txt")
 
             with self.settings(STATICFILES_DIRS=[static_dir]):
-                output = self._collectstatic_output(clear=True)
+                output = self._collectstatic_output(clear=True, verbosity=2)
             self.assertIn(self.warning_string, output)
 
-            os.remove(duplicate)
+    def test_no_warning_at_verbosity_1(self):
+        """
+        There is no individual warning at verbosity 1, but summary is shown.
+        """
+        with tempfile.TemporaryDirectory() as static_dir:
+            duplicate = os.path.join(static_dir, "test", "file.txt")
+            os.mkdir(os.path.dirname(duplicate))
+            with open(duplicate, "w+") as f:
+                f.write("duplicate of file.txt")
 
-            # Make sure the warning went away again.
             with self.settings(STATICFILES_DIRS=[static_dir]):
-                output = self._collectstatic_output(clear=True)
+                output = self._collectstatic_output(clear=True, verbosity=1)
             self.assertNotIn(self.warning_string, output)
+            self.assertIn("1 skipped due to conflict", output)
+
+    def test_summary_multiple_conflicts(self):
+        """
+        Summary shows correct count for multiple conflicts.
+        """
+        with tempfile.TemporaryDirectory() as static_dir:
+            duplicate1 = os.path.join(static_dir, "test", "file.txt")
+            os.makedirs(os.path.dirname(duplicate1))
+            with open(duplicate1, "w+") as f:
+                f.write("duplicate of file.txt")
+            duplicate2 = os.path.join(static_dir, "test", "file1.txt")
+            with open(duplicate2, "w+") as f:
+                f.write("duplicate of file1.txt")
+            duplicate3 = os.path.join(static_dir, "test", "nonascii.css")
+            shutil.copy2(duplicate1, duplicate3)
+
+            with self.settings(STATICFILES_DIRS=[static_dir]):
+                output = self._collectstatic_output(clear=True, verbosity=1)
+            self.assertIn("3 skipped due to conflict", output)
 
 
-@override_settings(STATICFILES_STORAGE="staticfiles_tests.storage.DummyStorage")
+@override_settings(
+    STORAGES={
+        **settings.STORAGES,
+        STATICFILES_STORAGE_ALIAS: {
+            "BACKEND": "staticfiles_tests.storage.DummyStorage"
+        },
+    }
+)
 class TestCollectionNonLocalStorage(TestNoFilesCreated, CollectionTestCase):
     """
     Tests for a Storage that implements get_modified_time() but not path()
@@ -530,7 +633,7 @@ class TestCollectionNonLocalStorage(TestNoFilesCreated, CollectionTestCase):
         storage = DummyStorage()
         self.assertEqual(
             storage.get_modified_time("name"),
-            datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc),
+            datetime.datetime(1970, 1, 1, tzinfo=datetime.UTC),
         )
         with self.assertRaisesMessage(
             NotImplementedError, "This backend doesn't support absolute paths."
@@ -540,7 +643,12 @@ class TestCollectionNonLocalStorage(TestNoFilesCreated, CollectionTestCase):
 
 class TestCollectionNeverCopyStorage(CollectionTestCase):
     @override_settings(
-        STATICFILES_STORAGE="staticfiles_tests.storage.NeverCopyRemoteStorage"
+        STORAGES={
+            **settings.STORAGES,
+            STATICFILES_STORAGE_ALIAS: {
+                "BACKEND": "staticfiles_tests.storage.NeverCopyRemoteStorage"
+            },
+        }
     )
     def test_skips_newer_files_in_remote_storage(self):
         """
@@ -607,7 +715,12 @@ class TestCollectionLinks(TestDefaults, CollectionTestCase):
         self.assertFalse(os.path.lexists(broken_symlink_path))
 
     @override_settings(
-        STATICFILES_STORAGE="staticfiles_tests.storage.PathNotImplementedStorage"
+        STORAGES={
+            **settings.STORAGES,
+            STATICFILES_STORAGE_ALIAS: {
+                "BACKEND": "staticfiles_tests.storage.PathNotImplementedStorage"
+            },
+        }
     )
     def test_no_remote_link(self):
         with self.assertRaisesMessage(

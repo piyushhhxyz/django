@@ -1,7 +1,9 @@
 import unittest
 
 from django.core.exceptions import ImproperlyConfigured
-from django.db import ProgrammingError
+from django.db import ProgrammingError, connection
+from django.db.backends.base.base import NO_DB_ALIAS
+from django.test import TestCase
 
 try:
     from django.contrib.gis.db.backends.postgis.operations import PostGISOperations
@@ -9,6 +11,16 @@ try:
     HAS_POSTGRES = True
 except ImportError:
     HAS_POSTGRES = False
+
+
+class BaseSpatialFeaturesTests(TestCase):
+    def test_invalid_has_func_function(self):
+        msg = (
+            'DatabaseFeatures.has_Invalid_function isn\'t valid. Is "Invalid" '
+            "missing from BaseSpatialOperations.unsupported_functions?"
+        )
+        with self.assertRaisesMessage(ValueError, msg):
+            connection.features.has_Invalid_function
 
 
 if HAS_POSTGRES:
@@ -36,7 +48,7 @@ if HAS_POSTGRES:
                 raise NotImplementedError("This function was not expected to be called")
 
 
-@unittest.skipUnless(HAS_POSTGRES, "The psycopg2 driver is needed for these tests")
+@unittest.skipUnless(HAS_POSTGRES, "The psycopg driver is needed for these tests")
 class TestPostGISVersionCheck(unittest.TestCase):
     """
     The PostGIS version check parses correctly the version numbers
@@ -83,3 +95,18 @@ class TestPostGISVersionCheck(unittest.TestCase):
         ops = FakePostGISOperations()
         with self.assertRaises(ImproperlyConfigured):
             ops.spatial_version
+
+
+@unittest.skipUnless(HAS_POSTGRES, "PostGIS-specific tests.")
+class TestPostGISBackend(unittest.TestCase):
+    def test_non_db_connection_classes(self):
+        from django.contrib.gis.db.backends.postgis.base import DatabaseWrapper
+        from django.db.backends.postgresql.features import DatabaseFeatures
+        from django.db.backends.postgresql.introspection import DatabaseIntrospection
+        from django.db.backends.postgresql.operations import DatabaseOperations
+
+        wrapper = DatabaseWrapper(settings_dict={}, alias=NO_DB_ALIAS)
+        # PostGIS-specific stuff is not initialized for non-db connections.
+        self.assertIs(wrapper.features_class, DatabaseFeatures)
+        self.assertIs(wrapper.ops_class, DatabaseOperations)
+        self.assertIs(wrapper.introspection_class, DatabaseIntrospection)

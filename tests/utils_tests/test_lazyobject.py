@@ -1,9 +1,10 @@
 import copy
 import pickle
 import sys
+import unittest
 import warnings
-from unittest import TestCase
 
+from django.test import TestCase
 from django.utils.functional import LazyObject, SimpleLazyObject, empty
 
 from .models import Category, CategoryInfo
@@ -20,7 +21,7 @@ class Foo:
         return self.foo == other.foo
 
 
-class LazyObjectTestCase(TestCase):
+class LazyObjectTestCase(unittest.TestCase):
     def lazy_wrap(self, wrapped_object):
         """
         Wrap the given object into a LazyObject
@@ -346,6 +347,22 @@ class SimpleLazyObjectTestCase(LazyObjectTestCase):
         self.assertEqual(obj, 42)  # evaluate the lazy object
         self.assertIsInstance(obj._wrapped, int)
         self.assertEqual(repr(obj), "<SimpleLazyObject: 42>")
+
+    def test_repr_bound_method(self):
+
+        class MyLazyGenerator(SimpleLazyObject):
+            def __init__(self):
+                super().__init__(self._generate)
+
+            def _generate(self):
+                return "test-generated-value"
+
+        obj = MyLazyGenerator()
+        self.assertEqual(repr(obj), "<MyLazyGenerator: '<bound method _generate>'>")
+        self.assertIs(obj._wrapped, empty)  # The evaluation hasn't happened.
+
+        self.assertEqual(str(obj), "test-generated-value")  # Evaluate.
+        self.assertEqual(repr(obj), "<MyLazyGenerator: 'test-generated-value'>")
 
     def test_add(self):
         obj1 = self.lazy_wrap(1)

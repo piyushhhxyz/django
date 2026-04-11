@@ -1,5 +1,6 @@
 import uuid
 
+from django.contrib.auth.models import User
 from django.db import models
 
 
@@ -16,10 +17,24 @@ class Child(models.Model):
     parent = models.ForeignKey(Parent, models.SET_NULL, editable=False, null=True)
     name = models.CharField(max_length=30, blank=True)
     age = models.IntegerField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+
+class GrandChild(models.Model):
+    parent = models.ForeignKey(Child, models.SET_NULL, editable=False, null=True)
+    name = models.CharField(max_length=30, blank=True)
+
+    def __str__(self):
+        return self.name
+
+    def __html__(self):
+        return f'<h2 class="main">{self.name}</h2>'
 
 
 class Genre(models.Model):
     name = models.CharField(max_length=20)
+    file = models.FileField(upload_to="documents/", blank=True, null=True)
+    url = models.URLField(blank=True, null=True)
 
 
 class Band(models.Model):
@@ -121,3 +136,15 @@ class CustomIdUser(models.Model):
 
 class CharPK(models.Model):
     char_pk = models.CharField(max_length=100, primary_key=True)
+
+
+class ProxyUser(User):
+    class Meta:
+        proxy = True
+
+
+class MixedFieldsModel(models.Model):
+    """Model with multiple field types for testing search validation."""
+
+    int_field = models.IntegerField(null=True, blank=True)
+    json_field = models.JSONField(null=True, blank=True)

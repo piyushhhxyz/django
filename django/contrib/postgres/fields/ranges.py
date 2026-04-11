@@ -1,10 +1,16 @@
 import datetime
 import json
 
-from psycopg2.extras import DateRange, DateTimeTZRange, NumericRange, Range
-
 from django.contrib.postgres import forms, lookups
+from django.contrib.postgres.utils import CheckPostgresInstalledMixin
 from django.db import models
+from django.db.backends.postgresql.psycopg_any import (
+    DateRange,
+    DateTimeTZRange,
+    NumericRange,
+    Range,
+)
+from django.db.models.functions import Cast
 from django.db.models.lookups import PostgresOperatorLookup
 
 from .utils import AttributeSetter
@@ -46,7 +52,7 @@ class RangeOperators:
     ADJACENT_TO = "-|-"
 
 
-class RangeField(models.Field):
+class RangeField(CheckPostgresInstalledMixin, models.Field):
     empty_strings_allowed = False
 
     def __init__(self, *args, **kwargs):
@@ -77,6 +83,13 @@ class RangeField(models.Field):
     @classmethod
     def _choices_is_value(cls, value):
         return isinstance(value, (list, tuple)) or super()._choices_is_value(value)
+
+    def get_placeholder_sql(self, value, compiler, connection):
+        db_type = self.db_type(connection)
+        if hasattr(value, "as_sql"):
+            sql, params = compiler.compile(value)
+            return f"{sql}::{db_type}", params
+        return f"%s::{db_type}", (value,)
 
     def get_prep_value(self, value):
         if value is None:
@@ -201,7 +214,14 @@ class DateRangeField(RangeField):
         return "daterange"
 
 
-RangeField.register_lookup(lookups.DataContains)
+class RangeContains(lookups.DataContains):
+    def get_prep_lookup(self):
+        if not isinstance(self.rhs, (list, tuple, Range)):
+            return Cast(self.rhs, self.lhs.field.base_field)
+        return super().get_prep_lookup()
+
+
+RangeField.register_lookup(RangeContains)
 RangeField.register_lookup(lookups.ContainedBy)
 RangeField.register_lookup(lookups.Overlap)
 

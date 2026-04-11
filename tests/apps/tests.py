@@ -1,12 +1,20 @@
 import os
+from unittest.mock import patch
 
+import django
 from django.apps import AppConfig, apps
 from django.apps.registry import Apps
 from django.contrib.admin.models import LogEntry
 from django.core.exceptions import AppRegistryNotReady, ImproperlyConfigured
-from django.db import models
-from django.test import SimpleTestCase, override_settings
+from django.db import connections, models
+from django.test import (
+    SimpleTestCase,
+    TransactionTestCase,
+    override_settings,
+    skipUnlessDBFeature,
+)
 from django.test.utils import extend_sys_path, isolate_apps
+from django.utils.functional import cached_property
 
 from .models import SoAlternative, TotallyNormal, new_apps
 from .one_config_app.apps import OneConfig
@@ -197,6 +205,38 @@ class AppsTests(SimpleTestCase):
         with self.assertRaises(ValueError):
             apps.get_model("admin_LogEntry")
 
+    @override_settings(INSTALLED_APPS=SOME_INSTALLED_APPS)
+    def test_clear_cache(self):
+        # Set cache.
+        self.assertIsNone(apps.get_swappable_settings_name("admin.LogEntry"))
+        apps.get_models()
+
+        apps.clear_cache()
+
+        self.assertEqual(apps.get_swappable_settings_name.cache_info().currsize, 0)
+        self.assertEqual(apps.get_models.cache_info().currsize, 0)
+
+    @override_settings(INSTALLED_APPS=SOME_INSTALLED_APPS)
+    def test_cached_properties_cleared_after_cache_clear(self):
+        opts = apps.get_model("admin", "LogEntry")._meta
+
+        cached_properties = [
+            name
+            for name, attr in models.options.Options.__dict__.items()
+            if isinstance(attr, cached_property)
+        ]
+
+        # Access each cached property to populate the cache.
+        for attr_name in cached_properties:
+            getattr(opts, attr_name)
+            self.assertIn(attr_name, opts.__dict__)
+
+        apps.clear_cache()
+
+        for attr_name in cached_properties:
+            with self.subTest(property=attr_name):
+                self.assertNotIn(attr_name, opts.__dict__)
+
     @override_settings(INSTALLED_APPS=["apps.apps.RelabeledAppsConfig"])
     def test_relabeling(self):
         self.assertEqual(apps.get_app_config("relabeled").name, "apps")
@@ -370,7 +410,8 @@ class AppsTests(SimpleTestCase):
         class LazyC(models.Model):
             pass
 
-        # Everything should be loaded - make sure the callback was executed properly.
+        # Everything should be loaded - make sure the callback was executed
+        # properly.
         self.assertEqual(model_classes, [LazyA, LazyB, LazyB, LazyC, LazyA])
 
 
@@ -403,7 +444,9 @@ class AppConfigTests(SimpleTestCase):
         self.assertEqual(ac.path, "foo")
 
     def test_dunder_path(self):
-        """If single element in __path__, use it (in preference to __file__)."""
+        """
+        If single element in __path__, use it (in preference to __file__).
+        """
         ac = AppConfig("label", Stub(__path__=["a"], __file__="b/__init__.py"))
 
         self.assertEqual(ac.path, "a")
@@ -528,3 +571,77 @@ class NamespacePackageAppTests(SimpleTestCase):
             with self.settings(INSTALLED_APPS=["nsapp.apps.NSAppConfig"]):
                 app_config = apps.get_app_config("nsapp")
                 self.assertEqual(app_config.path, self.app_path)
+
+
+class QueryPerformingAppTests(TransactionTestCase):
+    available_apps = ["apps"]
+    databases = {"default", "other"}
+    expected_msg = (
+        "Accessing the database during app initialization is discouraged. To fix this "
+        "warning, avoid executing queries in AppConfig.ready() or when your app "
+        "modules are imported."
+    )
+
+    def test_query_default_database_using_model(self):
+        query_results = self.run_setup("QueryDefaultDatabaseModelAppConfig")
+        self.assertSequenceEqual(query_results, [("new name",)])
+
+    def test_query_other_database_using_model(self):
+        query_results = self.run_setup("QueryOtherDatabaseModelAppConfig")
+        self.assertSequenceEqual(query_results, [("new name",)])
+
+    def test_query_default_database_using_cursor(self):
+        query_results = self.run_setup("QueryDefaultDatabaseCursorAppConfig")
+        self.assertSequenceEqual(query_results, [(42,)])
+
+    def test_query_other_database_using_cursor(self):
+        query_results = self.run_setup("QueryOtherDatabaseCursorAppConfig")
+        self.assertSequenceEqual(query_results, [(42,)])
+
+    def test_query_many_default_database_using_cursor(self):
+        self.run_setup("QueryDefaultDatabaseCursorManyAppConfig")
+
+    def test_query_many_other_database_using_cursor(self):
+        self.run_setup("QueryOtherDatabaseCursorManyAppConfig")
+
+    @skipUnlessDBFeature("create_test_procedure_without_params_sql")
+    def test_query_default_database_using_stored_procedure(self):
+        connection = connections["default"]
+        with connection.cursor() as cursor:
+            cursor.execute(connection.features.create_test_procedure_without_params_sql)
+
+        try:
+            self.run_setup("QueryDefaultDatabaseStoredProcedureAppConfig")
+        finally:
+            with connection.schema_editor() as editor:
+                editor.remove_procedure("test_procedure")
+
+    @skipUnlessDBFeature("create_test_procedure_without_params_sql")
+    def test_query_other_database_using_stored_procedure(self):
+        connection = connections["other"]
+        with connection.cursor() as cursor:
+            cursor.execute(connection.features.create_test_procedure_without_params_sql)
+
+        try:
+            self.run_setup("QueryOtherDatabaseStoredProcedureAppConfig")
+        finally:
+            with connection.schema_editor() as editor:
+                editor.remove_procedure("test_procedure")
+
+    def run_setup(self, app_config_name):
+        custom_settings = override_settings(
+            INSTALLED_APPS=[f"apps.query_performing_app.apps.{app_config_name}"]
+        )
+        custom_settings.enable()
+        old_stored_app_configs = apps.stored_app_configs
+        apps.stored_app_configs = []
+        try:
+            with patch.multiple(apps, ready=False, loading=False, app_configs={}):
+                with self.assertWarnsMessage(RuntimeWarning, self.expected_msg):
+                    django.setup()
+
+                app_config = apps.get_app_config("query_performing_app")
+                return app_config.query_results
+        finally:
+            setattr(apps, "stored_app_configs", old_stored_app_configs)
+            custom_settings.disable()

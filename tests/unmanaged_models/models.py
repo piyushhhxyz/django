@@ -5,7 +5,7 @@ is generated for the table on various manage.py operations.
 
 from django.db import models
 
-#  All of these models are created in the database by Django.
+# All of these models are created in the database by Django.
 
 
 class A01(models.Model):
@@ -84,6 +84,7 @@ class Intermediate(models.Model):
 # between managed and unmanaged models. A join table between two unmanaged
 # models shouldn't be automatically created (see #10647).
 #
+
 
 # Firstly, we need some models that will create the tables, purely so that the
 # tables are created. This is a test setup, not a requirement for unmanaged

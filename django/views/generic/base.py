@@ -1,5 +1,6 @@
-import asyncio
 import logging
+from inspect import iscoroutinefunction, markcoroutinefunction
+from urllib.parse import urlparse
 
 from django.core.exceptions import ImproperlyConfigured
 from django.http import (
@@ -13,6 +14,7 @@ from django.template.response import TemplateResponse
 from django.urls import reverse
 from django.utils.decorators import classonlymethod
 from django.utils.functional import classproperty
+from django.utils.log import log_response
 
 logger = logging.getLogger("django.request")
 
@@ -68,8 +70,8 @@ class View:
         ]
         if not handlers:
             return False
-        is_async = asyncio.iscoroutinefunction(handlers[0])
-        if not all(asyncio.iscoroutinefunction(h) == is_async for h in handlers[1:]):
+        is_async = iscoroutinefunction(handlers[0])
+        if not all(iscoroutinefunction(h) == is_async for h in handlers[1:]):
             raise ImproperlyConfigured(
                 f"{cls.__qualname__} HTTP handlers must either be all sync or all "
                 "async."
@@ -117,7 +119,7 @@ class View:
 
         # Mark the callback if the view class is async.
         if cls.view_is_async:
-            view._is_coroutine = asyncio.coroutines._is_coroutine
+            markcoroutinefunction(view)
 
         return view
 
@@ -133,22 +135,31 @@ class View:
         # Try to dispatch to the right method; if a method doesn't exist,
         # defer to the error handler. Also defer to the error handler if the
         # request method isn't on the approved list.
-        if request.method.lower() in self.http_method_names:
-            handler = getattr(
-                self, request.method.lower(), self.http_method_not_allowed
-            )
+        method = request.method.lower()
+        if method in self.http_method_names:
+            handler = getattr(self, method, self.http_method_not_allowed)
         else:
             handler = self.http_method_not_allowed
         return handler(request, *args, **kwargs)
 
     def http_method_not_allowed(self, request, *args, **kwargs):
-        logger.warning(
+        response = HttpResponseNotAllowed(self._allowed_methods())
+        log_response(
             "Method Not Allowed (%s): %s",
             request.method,
             request.path,
-            extra={"status_code": 405, "request": request},
+            response=response,
+            request=request,
         )
-        return HttpResponseNotAllowed(self._allowed_methods())
+
+        if self.view_is_async:
+
+            async def func():
+                return response
+
+            return func()
+        else:
+            return response
 
     def options(self, request, *args, **kwargs):
         """Handle responding to requests for the OPTIONS HTTP verb."""
@@ -240,7 +251,10 @@ class RedirectView(View):
 
         args = self.request.META.get("QUERY_STRING", "")
         if args and self.query_string:
-            url = "%s?%s" % (url, args)
+            if urlparse(url).query:
+                url = f"{url}&{args}"
+            else:
+                url = f"{url}?{args}"
         return url
 
     def get(self, request, *args, **kwargs):
@@ -251,10 +265,9 @@ class RedirectView(View):
             else:
                 return HttpResponseRedirect(url)
         else:
-            logger.warning(
-                "Gone: %s", request.path, extra={"status_code": 410, "request": request}
-            )
-            return HttpResponseGone()
+            response = HttpResponseGone()
+            log_response("Gone: %s", request.path, response=response, request=request)
+            return response
 
     def head(self, request, *args, **kwargs):
         return self.get(request, *args, **kwargs)

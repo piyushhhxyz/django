@@ -34,26 +34,31 @@ available from the ``django.contrib.postgres.indexes`` module.
 .. class:: BrinIndex(*expressions, autosummarize=None, pages_per_range=None, **options)
 
     Creates a `BRIN index
-    <https://www.postgresql.org/docs/current/brin-intro.html>`_.
+    <https://www.postgresql.org/docs/current/brin.html>`_.
 
     Set the ``autosummarize`` parameter to ``True`` to enable `automatic
     summarization`_ to be performed by autovacuum.
 
     The ``pages_per_range`` argument takes a positive integer.
 
-    .. _automatic summarization: https://www.postgresql.org/docs/current/brin-intro.html#BRIN-OPERATION
+    .. _automatic summarization: https://www.postgresql.org/docs/current/brin.html#BRIN-OPERATION
 
 ``BTreeIndex``
 ==============
 
-.. class:: BTreeIndex(*expressions, fillfactor=None, **options)
+.. class:: BTreeIndex(*expressions, fillfactor=None, deduplicate_items=None, **options)
 
     Creates a B-Tree index.
 
     Provide an integer value from 10 to 100 to the fillfactor_ parameter to
     tune how packed the index pages will be. PostgreSQL's default is 90.
 
+    Provide a boolean value to the deduplicate_items_ parameter to control
+    whether deduplication is enabled. PostgreSQL enables deduplication by
+    default.
+
     .. _fillfactor: https://www.postgresql.org/docs/current/sql-createindex.html#SQL-CREATEINDEX-STORAGE-PARAMETERS
+    .. _deduplicate_items: https://www.postgresql.org/docs/current/btree.html#BTREE-DEDUPLICATION
 
 ``GinIndex``
 ============
@@ -63,7 +68,7 @@ available from the ``django.contrib.postgres.indexes`` module.
     Creates a `gin index <https://www.postgresql.org/docs/current/gin.html>`_.
 
     To use this index on data types not in the `built-in operator classes
-    <https://www.postgresql.org/docs/current/gin-builtin-opclasses.html>`_,
+    <https://www.postgresql.org/docs/current/gin.html#GIN-BUILTIN-OPCLASSES>`_,
     you need to activate the `btree_gin extension
     <https://www.postgresql.org/docs/current/btree-gin.html>`_ on
     PostgreSQL. You can install it using the
@@ -73,11 +78,11 @@ available from the ``django.contrib.postgres.indexes`` module.
     Set the ``fastupdate`` parameter to ``False`` to disable the `GIN Fast
     Update Technique`_ that's enabled by default in PostgreSQL.
 
-    Provide an integer number of bytes to the gin_pending_list_limit_ parameter
-    to tune the maximum size of the GIN pending list which is used when
-    ``fastupdate`` is enabled.
+    Provide an integer number of kilobytes to the gin_pending_list_limit_
+    parameter to tune the maximum size of the GIN pending list which is used
+    when ``fastupdate`` is enabled.
 
-    .. _GIN Fast Update Technique: https://www.postgresql.org/docs/current/gin-implementation.html#GIN-FAST-UPDATE
+    .. _GIN Fast Update Technique: https://www.postgresql.org/docs/current/gin.html#GIN-FAST-UPDATE
     .. _gin_pending_list_limit: https://www.postgresql.org/docs/current/runtime-config-client.html#GUC-GIN-PENDING-LIST-LIMIT
 
 ``GistIndex``
@@ -94,7 +99,7 @@ available from the ``django.contrib.postgres.indexes`` module.
     fields <range-fields>`.
 
     To use this index on data types not in the built-in `gist operator classes
-    <https://www.postgresql.org/docs/current/gist-builtin-opclasses.html>`_,
+    <https://www.postgresql.org/docs/current/gist.html#GIST-BUILTIN-OPCLASSES>`_,
     you need to activate the `btree_gist extension
     <https://www.postgresql.org/docs/current/btree-gist.html>`_ on PostgreSQL.
     You can install it using the
@@ -107,7 +112,7 @@ available from the ``django.contrib.postgres.indexes`` module.
     Provide an integer value from 10 to 100 to the fillfactor_ parameter to
     tune how packed the index pages will be. PostgreSQL's default is 90.
 
-    .. _buffering build: https://www.postgresql.org/docs/current/gist-implementation.html#GIST-BUFFERING-BUILD
+    .. _buffering build: https://www.postgresql.org/docs/current/gist.html#GIST-BUFFERING-BUILD
     .. _fillfactor: https://www.postgresql.org/docs/current/sql-createindex.html#SQL-CREATEINDEX-STORAGE-PARAMETERS
 
 ``HashIndex``
@@ -119,11 +124,6 @@ available from the ``django.contrib.postgres.indexes`` module.
 
     Provide an integer value from 10 to 100 to the fillfactor_ parameter to
     tune how packed the index pages will be. PostgreSQL's default is 90.
-
-    .. admonition:: Use this index only on PostgreSQL 10 and later
-
-        Hash indexes have been available in PostgreSQL for a long time, but
-        they suffer from a number of data integrity issues in older versions.
 
     .. _fillfactor: https://www.postgresql.org/docs/current/sql-createindex.html#SQL-CREATEINDEX-STORAGE-PARAMETERS
 
@@ -137,10 +137,6 @@ available from the ``django.contrib.postgres.indexes`` module.
 
     Provide an integer value from 10 to 100 to the fillfactor_ parameter to
     tune how packed the index pages will be. PostgreSQL's default is 90.
-
-    .. versionchanged:: 4.1
-
-        Support for covering SP-GiST indexes on PostgreSQL 14+ was added.
 
     .. _fillfactor: https://www.postgresql.org/docs/current/sql-createindex.html#SQL-CREATEINDEX-STORAGE-PARAMETERS
 
@@ -158,16 +154,16 @@ available from the ``django.contrib.postgres.indexes`` module.
     For example::
 
         Index(
-            OpClass(Lower('username'), name='varchar_pattern_ops'),
-            name='lower_username_idx',
+            OpClass(Lower("username"), name="varchar_pattern_ops"),
+            name="lower_username_idx",
         )
 
     creates an index on ``Lower('username')`` using ``varchar_pattern_ops``.
     ::
 
         UniqueConstraint(
-            OpClass(Upper('description'), name='text_pattern_ops'),
-            name='upper_description_unique',
+            OpClass(Upper("description"), name="text_pattern_ops"),
+            name="upper_description_unique",
         )
 
     creates a unique constraint on ``Upper('description')`` using
@@ -175,20 +171,12 @@ available from the ``django.contrib.postgres.indexes`` module.
     ::
 
         ExclusionConstraint(
-            name='exclude_overlapping_ops',
+            name="exclude_overlapping_ops",
             expressions=[
-                (OpClass('circle', name='circle_ops'), RangeOperators.OVERLAPS),
+                (OpClass("circle", name="circle_ops"), RangeOperators.OVERLAPS),
             ],
         )
 
     creates an exclusion constraint on ``circle`` using ``circle_ops``.
-
-    .. versionchanged:: 4.0
-
-        Support for functional unique constraints was added.
-
-    .. versionchanged:: 4.1
-
-        Support for exclusion constraints was added.
 
     .. _operator class: https://www.postgresql.org/docs/current/indexes-opclass.html

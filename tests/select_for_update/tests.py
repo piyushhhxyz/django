@@ -13,6 +13,8 @@ from django.db import (
     router,
     transaction,
 )
+from django.db.models import F, Value
+from django.db.models.functions import Concat
 from django.test import (
     TransactionTestCase,
     override_settings,
@@ -33,7 +35,6 @@ from .models import (
 
 
 class SelectForUpdateTests(TransactionTestCase):
-
     available_apps = ["select_for_update"]
 
     def setUp(self):
@@ -151,6 +152,15 @@ class SelectForUpdateTests(TransactionTestCase):
         self.assertTrue(self.has_for_update_sql(ctx.captured_queries, of=expected))
 
     @skipUnlessDBFeature("has_select_for_update_of")
+    def test_for_update_of_values_list(self):
+        queries = Person.objects.select_for_update(
+            of=("self",),
+        ).values_list(Concat(Value("Dr. "), F("name")), "born")
+        with transaction.atomic():
+            values = queries.get(pk=self.person.pk)
+        self.assertSequenceEqual(values, ("Dr. Reinhardt", self.city1.pk))
+
+    @skipUnlessDBFeature("has_select_for_update_of")
     def test_for_update_sql_model_inheritance_generated_of(self):
         with transaction.atomic(), CaptureQueriesContext(connection) as ctx:
             list(EUCountry.objects.select_for_update(of=("self",)))
@@ -243,7 +253,7 @@ class SelectForUpdateTests(TransactionTestCase):
     def test_for_update_sql_model_proxy_generated_of(self):
         with transaction.atomic(), CaptureQueriesContext(connection) as ctx:
             list(
-                CityCountryProxy.objects.select_related("country",).select_for_update(
+                CityCountryProxy.objects.select_related("country").select_for_update(
                     of=("country",),
                 )
             )
@@ -422,7 +432,7 @@ class SelectForUpdateTests(TransactionTestCase):
             with self.subTest(name=name):
                 with self.assertRaisesMessage(FieldError, msg % name):
                     with transaction.atomic():
-                        Person.objects.select_related("born", "profile",).exclude(
+                        Person.objects.select_related("born", "profile").exclude(
                             profile=None
                         ).select_for_update(of=(name,)).get()
 
@@ -592,8 +602,8 @@ class SelectForUpdateTests(TransactionTestCase):
         # find that it has updated the person's name.
         self.assertFalse(thread.is_alive())
 
-        # We must commit the transaction to ensure that MySQL gets a fresh read,
-        # since by default it runs in REPEATABLE READ mode
+        # We must commit the transaction to ensure that MySQL gets a fresh
+        # read, since by default it runs in REPEATABLE READ mode
         transaction.commit()
 
         p = Person.objects.get(pk=self.person.pk)

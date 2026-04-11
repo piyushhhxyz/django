@@ -1,7 +1,10 @@
+import unittest
+
 from django.conf import settings
 from django.core.checks.messages import Error, Warning
 from django.core.checks.urls import (
     E006,
+    check_custom_error_handlers,
     check_url_config,
     check_url_namespaces_unique,
     check_url_settings,
@@ -9,6 +12,7 @@ from django.core.checks.urls import (
 )
 from django.test import SimpleTestCase
 from django.test.utils import override_settings
+from django.utils.version import PY314
 
 
 class CheckUrlConfigTests(SimpleTestCase):
@@ -23,7 +27,8 @@ class CheckUrlConfigTests(SimpleTestCase):
 
     @override_settings(ROOT_URLCONF="check_framework.urls.warning_in_include")
     def test_check_resolver_recursive(self):
-        # The resolver is checked recursively (examining URL patterns in include()).
+        # The resolver is checked recursively (examining URL patterns in
+        # include()).
         result = check_url_config(None)
         self.assertEqual(len(result), 1)
         warning = result[0]
@@ -161,6 +166,47 @@ class CheckUrlConfigTests(SimpleTestCase):
             ],
         )
 
+    @override_settings(
+        ROOT_URLCONF="check_framework.urls.path_compatibility.matched_angle_brackets"
+    )
+    def test_no_warnings_matched_angle_brackets(self):
+        self.assertEqual(check_url_config(None), [])
+
+    @override_settings(
+        ROOT_URLCONF="check_framework.urls.path_compatibility.unmatched_angle_brackets"
+    )
+    def test_warning_unmatched_angle_brackets(self):
+        self.assertEqual(
+            check_url_config(None),
+            [
+                Warning(
+                    "Your URL pattern 'beginning-with/<angle_bracket' has an unmatched "
+                    "'<' bracket.",
+                    id="urls.W010",
+                ),
+                Warning(
+                    "Your URL pattern 'ending-with/angle_bracket>' has an unmatched "
+                    "'>' bracket.",
+                    id="urls.W010",
+                ),
+                Warning(
+                    "Your URL pattern 'closed_angle>/x/<opened_angle' has an unmatched "
+                    "'>' bracket.",
+                    id="urls.W010",
+                ),
+                Warning(
+                    "Your URL pattern 'closed_angle>/x/<opened_angle' has an unmatched "
+                    "'<' bracket.",
+                    id="urls.W010",
+                ),
+                Warning(
+                    "Your URL pattern '<mixed>angle_bracket>' has an unmatched '>' "
+                    "bracket.",
+                    id="urls.W010",
+                ),
+            ],
+        )
+
 
 class UpdatedToPathTests(SimpleTestCase):
     @override_settings(
@@ -202,7 +248,7 @@ class CheckCustomErrorHandlersTests(SimpleTestCase):
         ROOT_URLCONF="check_framework.urls.bad_function_based_error_handlers",
     )
     def test_bad_function_based_handlers(self):
-        result = check_url_config(None)
+        result = check_custom_error_handlers(None)
         self.assertEqual(len(result), 4)
         for code, num_params, error in zip([400, 403, 404, 500], [2, 2, 2, 1], result):
             with self.subTest("handler{}".format(code)):
@@ -223,7 +269,7 @@ class CheckCustomErrorHandlersTests(SimpleTestCase):
         ROOT_URLCONF="check_framework.urls.bad_class_based_error_handlers",
     )
     def test_bad_class_based_handlers(self):
-        result = check_url_config(None)
+        result = check_custom_error_handlers(None)
         self.assertEqual(len(result), 4)
         for code, num_params, error in zip([400, 403, 404, 500], [2, 2, 2, 1], result):
             with self.subTest("handler%s" % code):
@@ -246,7 +292,7 @@ class CheckCustomErrorHandlersTests(SimpleTestCase):
         ROOT_URLCONF="check_framework.urls.bad_error_handlers_invalid_path"
     )
     def test_bad_handlers_invalid_path(self):
-        result = check_url_config(None)
+        result = check_custom_error_handlers(None)
         paths = [
             "django.views.bad_handler",
             "django.invalid_module.bad_handler",
@@ -277,14 +323,22 @@ class CheckCustomErrorHandlersTests(SimpleTestCase):
         ROOT_URLCONF="check_framework.urls.good_function_based_error_handlers",
     )
     def test_good_function_based_handlers(self):
-        result = check_url_config(None)
+        result = check_custom_error_handlers(None)
+        self.assertEqual(result, [])
+
+    @unittest.skipUnless(PY314, "Deferred annotations are Python 3.14+ only")
+    @override_settings(
+        ROOT_URLCONF="check_framework.urls.good_error_handler_deferred_annotations",
+    )
+    def test_good_function_based_handlers_deferred_annotations(self):
+        result = check_custom_error_handlers(None)
         self.assertEqual(result, [])
 
     @override_settings(
         ROOT_URLCONF="check_framework.urls.good_class_based_error_handlers",
     )
     def test_good_class_based_handlers(self):
-        result = check_url_config(None)
+        result = check_custom_error_handlers(None)
         self.assertEqual(result, [])
 
 

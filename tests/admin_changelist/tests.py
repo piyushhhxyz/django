@@ -1,4 +1,5 @@
 import datetime
+from unittest import mock
 
 from django.contrib import admin
 from django.contrib.admin.models import LogEntry
@@ -7,6 +8,7 @@ from django.contrib.admin.templatetags.admin_list import pagination
 from django.contrib.admin.tests import AdminSeleniumTestCase
 from django.contrib.admin.views.main import (
     ALL_VAR,
+    IS_FACETS_VAR,
     IS_POPUP_VAR,
     ORDER_VAR,
     PAGE_VAR,
@@ -14,16 +16,15 @@ from django.contrib.admin.views.main import (
     TO_FIELD_VAR,
 )
 from django.contrib.auth.models import User
-from django.contrib.contenttypes.models import ContentType
 from django.contrib.messages.storage.cookie import CookieStorage
-from django.db import connection, models
+from django.db import DatabaseError, connection
 from django.db.models import F, Field, IntegerField
 from django.db.models.functions import Upper
 from django.db.models.lookups import Contains, Exact
 from django.template import Context, Template, TemplateSyntaxError
-from django.test import TestCase, override_settings
+from django.test import TestCase, override_settings, skipUnlessDBFeature
 from django.test.client import RequestFactory
-from django.test.utils import CaptureQueriesContext, isolate_apps, register_lookup
+from django.test.utils import CaptureQueriesContext, register_lookup
 from django.urls import reverse
 from django.utils import formats
 
@@ -41,6 +42,7 @@ from .admin import (
     EmptyValueChildAdmin,
     EventAdmin,
     FilteredChildAdmin,
+    GrandChildAdmin,
     GroupAdmin,
     InvitationAdmin,
     NoListDisplayLinksParentAdmin,
@@ -60,9 +62,11 @@ from .models import (
     CustomIdUser,
     Event,
     Genre,
+    GrandChild,
     Group,
     Invitation,
     Membership,
+    MixedFieldsModel,
     Musician,
     OrderedObject,
     Parent,
@@ -73,15 +77,15 @@ from .models import (
 )
 
 
-def build_tbody_html(pk, href, extra_fields):
+def build_tbody_html(obj, href, field_name, extra_fields):
     return (
         "<tbody><tr>"
         '<td class="action-checkbox">'
         '<input type="checkbox" name="_selected_action" value="{}" '
-        'class="action-select"></td>'
-        '<th class="field-name"><a href="{}">name</a></th>'
+        'class="action-select" aria-label="Select this object for an action - {}"></td>'
+        '<th class="field-name"><a href="{}">{}</a></th>'
         "{}</tr></tbody>"
-    ).format(pk, href, extra_fields)
+    ).format(obj.pk, str(obj), href, field_name, extra_fields)
 
 
 @override_settings(ROOT_URLCONF="admin_changelist.urls")
@@ -140,7 +144,8 @@ class ChangeListTests(TestCase):
     def test_select_related_preserved(self):
         """
         Regression test for #10348: ChangeList.get_queryset() shouldn't
-        overwrite a custom select_related provided by ModelAdmin.get_queryset().
+        overwrite a custom select_related provided by
+        ModelAdmin.get_queryset().
         """
         m = ChildAdmin(Child, custom_site)
         request = self.factory.get("/child/")
@@ -236,6 +241,27 @@ class ChangeListTests(TestCase):
         request.user = self.superuser
         m = ChildAdmin(Child, custom_site)
         cl = m.get_changelist_instance(request)
+        template = Template(
+            "{% load admin_list %}{% spaceless %}{% result_list cl %}{% endspaceless %}"
+        )
+        context = Context({"cl": cl, "opts": Child._meta})
+        table_output = template.render(context)
+        link = reverse("admin:admin_changelist_child_change", args=(new_child.id,))
+        row_html = build_tbody_html(
+            new_child, link, "name", '<td class="field-parent nowrap">-</td>'
+        )
+        self.assertNotEqual(
+            table_output.find(row_html),
+            -1,
+            "Failed to find expected row element: %s" % table_output,
+        )
+
+    def test_result_list_empty_changelist_value_blank_string(self):
+        new_child = Child.objects.create(name="", parent=None)
+        request = self.factory.get("/child/")
+        request.user = self.superuser
+        m = ChildAdmin(Child, custom_site)
+        cl = m.get_changelist_instance(request)
         cl.formset = None
         template = Template(
             "{% load admin_list %}{% spaceless %}{% result_list cl %}{% endspaceless %}"
@@ -244,13 +270,9 @@ class ChangeListTests(TestCase):
         table_output = template.render(context)
         link = reverse("admin:admin_changelist_child_change", args=(new_child.id,))
         row_html = build_tbody_html(
-            new_child.id, link, '<td class="field-parent nowrap">-</td>'
+            new_child, link, "-", '<td class="field-parent nowrap">-</td>'
         )
-        self.assertNotEqual(
-            table_output.find(row_html),
-            -1,
-            "Failed to find expected row element: %s" % table_output,
-        )
+        self.assertInHTML(row_html, table_output)
 
     def test_result_list_set_empty_value_display_on_admin_site(self):
         """
@@ -263,7 +285,6 @@ class ChangeListTests(TestCase):
         admin.site.empty_value_display = "???"
         m = ChildAdmin(Child, admin.site)
         cl = m.get_changelist_instance(request)
-        cl.formset = None
         template = Template(
             "{% load admin_list %}{% spaceless %}{% result_list cl %}{% endspaceless %}"
         )
@@ -271,7 +292,7 @@ class ChangeListTests(TestCase):
         table_output = template.render(context)
         link = reverse("admin:admin_changelist_child_change", args=(new_child.id,))
         row_html = build_tbody_html(
-            new_child.id, link, '<td class="field-parent nowrap">???</td>'
+            new_child, link, "name", '<td class="field-parent nowrap">???</td>'
         )
         self.assertNotEqual(
             table_output.find(row_html),
@@ -288,7 +309,6 @@ class ChangeListTests(TestCase):
         request.user = self.superuser
         m = EmptyValueChildAdmin(Child, admin.site)
         cl = m.get_changelist_instance(request)
-        cl.formset = None
         template = Template(
             "{% load admin_list %}{% spaceless %}{% result_list cl %}{% endspaceless %}"
         )
@@ -296,8 +316,9 @@ class ChangeListTests(TestCase):
         table_output = template.render(context)
         link = reverse("admin:admin_changelist_child_change", args=(new_child.id,))
         row_html = build_tbody_html(
-            new_child.id,
+            new_child,
             link,
+            "name",
             '<td class="field-age_display">&amp;dagger;</td>'
             '<td class="field-age">-empty-</td>',
         )
@@ -318,7 +339,6 @@ class ChangeListTests(TestCase):
         request.user = self.superuser
         m = ChildAdmin(Child, custom_site)
         cl = m.get_changelist_instance(request)
-        cl.formset = None
         template = Template(
             "{% load admin_list %}{% spaceless %}{% result_list cl %}{% endspaceless %}"
         )
@@ -326,7 +346,41 @@ class ChangeListTests(TestCase):
         table_output = template.render(context)
         link = reverse("admin:admin_changelist_child_change", args=(new_child.id,))
         row_html = build_tbody_html(
-            new_child.id, link, '<td class="field-parent nowrap">%s</td>' % new_parent
+            new_child,
+            link,
+            "name",
+            '<td class="field-parent nowrap">%s</td>' % new_parent,
+        )
+        self.assertNotEqual(
+            table_output.find(row_html),
+            -1,
+            "Failed to find expected row element: %s" % table_output,
+        )
+        self.assertInHTML(
+            '<input type="checkbox" id="action-toggle" '
+            'aria-label="Select all objects on this page for an action">',
+            table_output,
+        )
+
+    def test_action_checkbox_for_model_with_dunder_html(self):
+        grandchild = GrandChild.objects.create(name="name")
+        request = self._mocked_authenticated_request("/grandchild/", self.superuser)
+        m = GrandChildAdmin(GrandChild, custom_site)
+        cl = m.get_changelist_instance(request)
+        template = Template(
+            "{% load admin_list %}{% spaceless %}{% result_list cl %}{% endspaceless %}"
+        )
+        context = Context({"cl": cl, "opts": GrandChild._meta})
+        table_output = template.render(context)
+        link = reverse(
+            "admin:admin_changelist_grandchild_change", args=(grandchild.id,)
+        )
+        row_html = build_tbody_html(
+            grandchild,
+            link,
+            "name",
+            '<td class="field-parent__name">-</td>'
+            '<td class="field-parent__parent__name">-</td>',
         )
         self.assertNotEqual(
             table_output.find(row_html),
@@ -364,7 +418,7 @@ class ChangeListTests(TestCase):
         # make sure that hidden fields are in the correct place
         hiddenfields_div = (
             '<div class="hiddenfields">'
-            '<input type="hidden" name="form-0-id" value="%d" id="id_form-0-id">'
+            '<input type="hidden" name="form-0-id" value="%s" id="id_form-0-id">'
             "</div>"
         ) % new_child.id
         self.assertInHTML(
@@ -400,6 +454,53 @@ class ChangeListTests(TestCase):
         with self.assertRaises(IncorrectLookupParameters):
             m.get_changelist_instance(request)
 
+    @skipUnlessDBFeature("uses_savepoints")
+    def test_list_editable_atomicity(self):
+        a = Swallow.objects.create(origin="Swallow A", load=4, speed=1)
+        b = Swallow.objects.create(origin="Swallow B", load=2, speed=2)
+
+        self.client.force_login(self.superuser)
+        changelist_url = reverse("admin:admin_changelist_swallow_changelist")
+        data = {
+            "form-TOTAL_FORMS": "2",
+            "form-INITIAL_FORMS": "2",
+            "form-MIN_NUM_FORMS": "0",
+            "form-MAX_NUM_FORMS": "1000",
+            "form-0-uuid": str(a.pk),
+            "form-1-uuid": str(b.pk),
+            "form-0-load": "9.0",
+            "form-0-speed": "3.0",
+            "form-1-load": "5.0",
+            "form-1-speed": "1.0",
+            "_save": "Save",
+        }
+        with mock.patch(
+            "django.contrib.admin.ModelAdmin.log_change", side_effect=DatabaseError
+        ):
+            with self.assertRaises(DatabaseError):
+                self.client.post(changelist_url, data)
+        # Original values are preserved.
+        a.refresh_from_db()
+        self.assertEqual(a.load, 4)
+        self.assertEqual(a.speed, 1)
+        b.refresh_from_db()
+        self.assertEqual(b.load, 2)
+        self.assertEqual(b.speed, 2)
+
+        with mock.patch(
+            "django.contrib.admin.ModelAdmin.log_change",
+            side_effect=[None, DatabaseError],
+        ):
+            with self.assertRaises(DatabaseError):
+                self.client.post(changelist_url, data)
+        # Original values are preserved.
+        a.refresh_from_db()
+        self.assertEqual(a.load, 4)
+        self.assertEqual(a.speed, 1)
+        b.refresh_from_db()
+        self.assertEqual(b.load, 2)
+        self.assertEqual(b.speed, 2)
+
     def test_custom_paginator(self):
         new_parent = Parent.objects.create(name="parent")
         for i in range(1, 201):
@@ -413,7 +514,7 @@ class ChangeListTests(TestCase):
         cl.get_results(request)
         self.assertIsInstance(cl.paginator, CustomPaginator)
 
-    def test_no_duplicates_for_m2m_in_list_filter(self):
+    def test_distinct_for_m2m_in_list_filter(self):
         """
         Regression test for #13902: When using a ManyToMany in list_filter,
         results shouldn't appear more than once. Basic ManyToMany.
@@ -434,11 +535,10 @@ class ChangeListTests(TestCase):
         # There's only one Group instance
         self.assertEqual(cl.result_count, 1)
         # Queryset must be deletable.
-        self.assertIs(cl.queryset.query.distinct, False)
         cl.queryset.delete()
         self.assertEqual(cl.queryset.count(), 0)
 
-    def test_no_duplicates_for_through_m2m_in_list_filter(self):
+    def test_distinct_for_through_m2m_in_list_filter(self):
         """
         Regression test for #13902: When using a ManyToMany in list_filter,
         results shouldn't appear more than once. With an intermediate model.
@@ -458,14 +558,14 @@ class ChangeListTests(TestCase):
         # There's only one Group instance
         self.assertEqual(cl.result_count, 1)
         # Queryset must be deletable.
-        self.assertIs(cl.queryset.query.distinct, False)
         cl.queryset.delete()
         self.assertEqual(cl.queryset.count(), 0)
 
-    def test_no_duplicates_for_through_m2m_at_second_level_in_list_filter(self):
+    def test_distinct_for_through_m2m_at_second_level_in_list_filter(self):
         """
         When using a ManyToMany in list_filter at the second level behind a
-        ForeignKey, results shouldn't appear more than once.
+        ForeignKey, distinct() must be called and results shouldn't appear more
+        than once.
         """
         lead = Musician.objects.create(name="Vox")
         band = Group.objects.create(name="The Hype")
@@ -483,11 +583,10 @@ class ChangeListTests(TestCase):
         # There's only one Concert instance
         self.assertEqual(cl.result_count, 1)
         # Queryset must be deletable.
-        self.assertIs(cl.queryset.query.distinct, False)
         cl.queryset.delete()
         self.assertEqual(cl.queryset.count(), 0)
 
-    def test_no_duplicates_for_inherited_m2m_in_list_filter(self):
+    def test_distinct_for_inherited_m2m_in_list_filter(self):
         """
         Regression test for #13902: When using a ManyToMany in list_filter,
         results shouldn't appear more than once. Model managed in the
@@ -508,11 +607,10 @@ class ChangeListTests(TestCase):
         # There's only one Quartet instance
         self.assertEqual(cl.result_count, 1)
         # Queryset must be deletable.
-        self.assertIs(cl.queryset.query.distinct, False)
         cl.queryset.delete()
         self.assertEqual(cl.queryset.count(), 0)
 
-    def test_no_duplicates_for_m2m_to_inherited_in_list_filter(self):
+    def test_distinct_for_m2m_to_inherited_in_list_filter(self):
         """
         Regression test for #13902: When using a ManyToMany in list_filter,
         results shouldn't appear more than once. Target of the relationship
@@ -532,15 +630,11 @@ class ChangeListTests(TestCase):
 
         # There's only one ChordsBand instance
         self.assertEqual(cl.result_count, 1)
-        # Queryset must be deletable.
-        self.assertIs(cl.queryset.query.distinct, False)
-        cl.queryset.delete()
-        self.assertEqual(cl.queryset.count(), 0)
 
-    def test_no_duplicates_for_non_unique_related_object_in_list_filter(self):
+    def test_distinct_for_non_unique_related_object_in_list_filter(self):
         """
-        Regressions tests for #15819: If a field listed in list_filters is a
-        non-unique related object, results shouldn't appear more than once.
+        Regressions tests for #15819: If a field listed in list_filters
+        is a non-unique related object, distinct() must be called.
         """
         parent = Parent.objects.create(name="Mary")
         # Two children with the same name
@@ -552,10 +646,9 @@ class ChangeListTests(TestCase):
         request.user = self.superuser
 
         cl = m.get_changelist_instance(request)
-        # Exists() is applied.
+        # Make sure distinct() was called
         self.assertEqual(cl.queryset.count(), 1)
         # Queryset must be deletable.
-        self.assertIs(cl.queryset.query.distinct, False)
         cl.queryset.delete()
         self.assertEqual(cl.queryset.count(), 0)
 
@@ -575,10 +668,10 @@ class ChangeListTests(TestCase):
                 self.assertEqual(1, len(messages))
                 self.assertEqual(error, messages[0])
 
-    def test_no_duplicates_for_non_unique_related_object_in_search_fields(self):
+    def test_distinct_for_non_unique_related_object_in_search_fields(self):
         """
         Regressions tests for #15819: If a field listed in search_fields
-        is a non-unique related object, Exists() must be applied.
+        is a non-unique related object, distinct() must be called.
         """
         parent = Parent.objects.create(name="Mary")
         Child.objects.create(parent=parent, name="Danielle")
@@ -589,17 +682,16 @@ class ChangeListTests(TestCase):
         request.user = self.superuser
 
         cl = m.get_changelist_instance(request)
-        # Exists() is applied.
+        # Make sure distinct() was called
         self.assertEqual(cl.queryset.count(), 1)
         # Queryset must be deletable.
-        self.assertIs(cl.queryset.query.distinct, False)
         cl.queryset.delete()
         self.assertEqual(cl.queryset.count(), 0)
 
-    def test_no_duplicates_for_many_to_many_at_second_level_in_search_fields(self):
+    def test_distinct_for_many_to_many_at_second_level_in_search_fields(self):
         """
         When using a ManyToMany in search_fields at the second level behind a
-        ForeignKey, Exists() must be applied and results shouldn't appear more
+        ForeignKey, distinct() must be called and results shouldn't appear more
         than once.
         """
         lead = Musician.objects.create(name="Vox")
@@ -616,7 +708,6 @@ class ChangeListTests(TestCase):
         # There's only one Concert instance
         self.assertEqual(cl.queryset.count(), 1)
         # Queryset must be deletable.
-        self.assertIs(cl.queryset.query.distinct, False)
         cl.queryset.delete()
         self.assertEqual(cl.queryset.count(), 0)
 
@@ -766,23 +857,149 @@ class ChangeListTests(TestCase):
         cl = m.get_changelist_instance(request)
         self.assertCountEqual(cl.queryset, [abcd])
 
-    def test_no_exists_for_m2m_in_list_filter_without_params(self):
+    def test_exact_lookup_with_invalid_value(self):
+        Child.objects.create(name="Test", age=10)
+        m = admin.ModelAdmin(Child, custom_site)
+        m.search_fields = ["pk__exact"]
+
+        request = self.factory.get("/", data={SEARCH_VAR: "foo"})
+        request.user = self.superuser
+
+        # Invalid values are gracefully ignored.
+        cl = m.get_changelist_instance(request)
+        self.assertCountEqual(cl.queryset, [])
+
+    def test_exact_lookup_mixed_terms(self):
+        """
+        Multi-term search validates each term independently.
+
+        For 'foo 123' with search_fields=['name__icontains', 'age__exact']:
+        - 'foo': age lookup skipped (invalid), name lookup used
+        - '123': both lookups used (valid for age)
+        No Cast should be used; invalid lookups are simply skipped.
+        """
+        child = Child.objects.create(name="foo123", age=123)
+        Child.objects.create(name="other", age=456)
+        m = admin.ModelAdmin(Child, custom_site)
+        m.search_fields = ["name__icontains", "age__exact"]
+
+        request = self.factory.get("/", data={SEARCH_VAR: "foo 123"})
+        request.user = self.superuser
+
+        # One result matching on foo and 123.
+        cl = m.get_changelist_instance(request)
+        self.assertCountEqual(cl.queryset, [child])
+
+        # "xyz" - invalid for age (skipped), no match for name either.
+        request = self.factory.get("/", data={SEARCH_VAR: "xyz"})
+        request.user = self.superuser
+        cl = m.get_changelist_instance(request)
+        self.assertCountEqual(cl.queryset, [])
+
+    def test_exact_lookup_with_more_lenient_formfield(self):
+        """
+        Exact lookups on BooleanField use formfield().to_python() for lenient
+        parsing. Using model field's to_python() would reject 'false' whereas
+        the form field accepts it.
+        """
+        obj = UnorderedObject.objects.create(bool=False)
+        UnorderedObject.objects.create(bool=True)
+        m = admin.ModelAdmin(UnorderedObject, custom_site)
+        m.search_fields = ["bool__exact"]
+
+        # 'false' is accepted by form field but rejected by model field.
+        request = self.factory.get("/", data={SEARCH_VAR: "false"})
+        request.user = self.superuser
+
+        cl = m.get_changelist_instance(request)
+        self.assertCountEqual(cl.queryset, [obj])
+
+    @skipUnlessDBFeature("supports_primitives_in_json_field")
+    def test_exact_lookup_validates_each_field_independently(self):
+        """
+        Each field validates the search term independently without leaking
+        converted values between fields.
+
+        "3." is valid for IntegerField (converts to 3) but invalid for
+        JSONField. The converted value must not leak to the JSONField check.
+        """
+        # obj_int has int_field=3, should match "3." via IntegerField.
+        obj_int = MixedFieldsModel.objects.create(
+            int_field=3, json_field={"key": "value"}
+        )
+        # obj_json has json_field=3, should NOT match "3." because "3." is
+        # invalid JSON.
+        MixedFieldsModel.objects.create(int_field=99, json_field=3)
+        m = admin.ModelAdmin(MixedFieldsModel, custom_site)
+        m.search_fields = ["int_field__exact", "json_field__exact"]
+
+        # "3." is valid for int (becomes 3) but invalid JSON.
+        # Only obj_int should match via int_field.
+        request = self.factory.get("/", data={SEARCH_VAR: "3."})
+        request.user = self.superuser
+
+        cl = m.get_changelist_instance(request)
+        self.assertCountEqual(cl.queryset, [obj_int])
+
+    def test_search_with_exact_lookup_for_non_string_field(self):
+        child = Child.objects.create(name="Asher", age=11)
+        model_admin = ChildAdmin(Child, custom_site)
+
+        for search_term, expected_result in [
+            ("11", [child]),
+            ("Asher", [child]),
+            ("1", []),
+            ("A", []),
+            ("random", []),
+        ]:
+            request = self.factory.get("/", data={SEARCH_VAR: search_term})
+            request.user = self.superuser
+            with self.subTest(search_term=search_term):
+                # 1 query for filtered result, 1 for filtered count, 1 for
+                # total count.
+                with self.assertNumQueries(3):
+                    cl = model_admin.get_changelist_instance(request)
+                self.assertCountEqual(cl.queryset, expected_result)
+
+    def test_search_with_exact_lookup_relationship_field(self):
+        child = Child.objects.create(name="I am a child", age=11)
+        grandchild = GrandChild.objects.create(name="I am a grandchild", parent=child)
+        model_admin = GrandChildAdmin(GrandChild, custom_site)
+
+        request = self.factory.get("/", data={SEARCH_VAR: "'I am a child'"})
+        request.user = self.superuser
+        cl = model_admin.get_changelist_instance(request)
+        self.assertCountEqual(cl.queryset, [grandchild])
+        for search_term, expected_result in [
+            ("11", [grandchild]),
+            ("'I am a child'", [grandchild]),
+            ("1", []),
+            ("A", []),
+            ("random", []),
+        ]:
+            request = self.factory.get("/", data={SEARCH_VAR: search_term})
+            request.user = self.superuser
+            with self.subTest(search_term=search_term):
+                cl = model_admin.get_changelist_instance(request)
+                self.assertCountEqual(cl.queryset, expected_result)
+
+    def test_no_distinct_for_m2m_in_list_filter_without_params(self):
         """
         If a ManyToManyField is in list_filter but isn't in any lookup params,
-        the changelist's query shouldn't have Exists().
+        the changelist's query shouldn't have distinct.
         """
         m = BandAdmin(Band, custom_site)
         for lookup_params in ({}, {"name": "test"}):
             request = self.factory.get("/band/", lookup_params)
             request.user = self.superuser
             cl = m.get_changelist_instance(request)
-            self.assertNotIn(" EXISTS", str(cl.queryset.query))
+            self.assertIs(cl.queryset.query.distinct, False)
 
-        # A ManyToManyField in params does have Exists() applied.
+        # A ManyToManyField in params does have distinct applied.
         request = self.factory.get("/band/", {"genres": "0"})
         request.user = self.superuser
         cl = m.get_changelist_instance(request)
-        self.assertIn(" EXISTS", str(cl.queryset.query))
+        self.assertIs(cl.queryset.query.distinct, True)
 
     def test_pagination(self):
         """
@@ -811,6 +1028,41 @@ class ChangeListTests(TestCase):
         self.assertEqual(cl.paginator.count, 30)
         self.assertEqual(list(cl.paginator.page_range), [1, 2, 3])
 
+    def test_pagination_render(self):
+        objs = [Swallow(origin=f"Swallow {i}", load=i, speed=i) for i in range(1, 5)]
+        Swallow.objects.bulk_create(objs)
+
+        request = self.factory.get("/child/")
+        request.user = self.superuser
+
+        admin = SwallowAdmin(Swallow, custom_site)
+        cl = admin.get_changelist_instance(request)
+        template = Template(
+            "{% load admin_list %}{% spaceless %}{% pagination cl %}{% endspaceless %}"
+        )
+        context = Context({"cl": cl, "opts": cl.opts})
+        pagination_output = template.render(context)
+        self.assertTrue(
+            pagination_output.startswith(
+                '<nav class="paginator" aria-labelledby="pagination">'
+            )
+        )
+        self.assertInHTML(
+            '<h2 id="pagination" class="visually-hidden">Pagination swallows</h2>',
+            pagination_output,
+        )
+        self.assertTrue(pagination_output.endswith("</nav>"))
+        self.assertInHTML(
+            '<li><a role="button" href="" aria-current="page">1</a></li>',
+            pagination_output,
+        )
+        self.assertInHTML(
+            '<li><a role="button" href="?p=2">2</a></li>',
+            pagination_output,
+        )
+        self.assertEqual(pagination_output.count('aria-current="page"'), 1)
+        self.assertEqual(pagination_output.count('href=""'), 1)
+
     def test_computed_list_display_localization(self):
         """
         Regression test for #13196: output of functions should be  localized
@@ -834,7 +1086,7 @@ class ChangeListTests(TestCase):
         user_parents = self._create_superuser("parents")
 
         # Test with user 'noparents'
-        m = custom_site._registry[Child]
+        m = custom_site.get_model_admin(Child)
         request = self._mocked_authenticated_request("/child/", user_noparents)
         response = m.changelist_view(request)
         self.assertNotContains(response, "Parent object")
@@ -859,7 +1111,7 @@ class ChangeListTests(TestCase):
 
         # Test default implementation
         custom_site.register(Child, ChildAdmin)
-        m = custom_site._registry[Child]
+        m = custom_site.get_model_admin(Child)
         request = self._mocked_authenticated_request("/child/", user_noparents)
         response = m.changelist_view(request)
         self.assertContains(response, "Parent object")
@@ -922,6 +1174,25 @@ class ChangeListTests(TestCase):
         link = reverse("admin:admin_changelist_parent_change", args=(p.pk,))
         self.assertNotContains(response, '<a href="%s">' % link)
 
+    def test_link_field_display_links(self):
+        self.client.force_login(self.superuser)
+        g = Genre.objects.create(
+            name="Blues",
+            file="documents/blues_history.txt",
+            url="http://blues_history.com",
+        )
+        response = self.client.get(reverse("admin:admin_changelist_genre_changelist"))
+        self.assertContains(
+            response,
+            '<a href="/admin/admin_changelist/genre/%s/change/">'
+            "documents/blues_history.txt</a>" % g.pk,
+        )
+        self.assertContains(
+            response,
+            '<a href="/admin/admin_changelist/genre/%s/change/">'
+            "http://blues_history.com</a>" % g.pk,
+        )
+
     def test_clear_all_filters_link(self):
         self.client.force_login(self.superuser)
         url = reverse("admin:auth_user_changelist")
@@ -978,6 +1249,7 @@ class ChangeListTests(TestCase):
             {TO_FIELD_VAR: "id"},
             {PAGE_VAR: "1"},
             {IS_POPUP_VAR: "1"},
+            {IS_FACETS_VAR: ""},
             {"username__startswith": "test"},
         ):
             with self.subTest(data=data):
@@ -1146,7 +1418,9 @@ class ChangeListTests(TestCase):
         self.assertEqual(queryset.count(), 1)
 
     def test_changelist_view_list_editable_changed_objects_uses_filter(self):
-        """list_editable edits use a filtered queryset to limit memory usage."""
+        """
+        list_editable edits use a filtered queryset to limit memory usage.
+        """
         a = Swallow.objects.create(origin="Swallow A", load=4, speed=1)
         Swallow.objects.create(origin="Swallow B", load=2, speed=2)
         data = {
@@ -1166,8 +1440,27 @@ class ChangeListTests(TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertIn("WHERE", context.captured_queries[4]["sql"])
             self.assertIn("IN", context.captured_queries[4]["sql"])
-            # Check only the first few characters since the UUID may have dashes.
+            # Check only the first few characters since the UUID may have
+            # dashes.
             self.assertIn(str(a.pk)[:8], context.captured_queries[4]["sql"])
+
+    def test_list_editable_error_title(self):
+        a = Swallow.objects.create(origin="Swallow A", load=4, speed=1)
+        Swallow.objects.create(origin="Swallow B", load=2, speed=2)
+        data = {
+            "form-TOTAL_FORMS": "2",
+            "form-INITIAL_FORMS": "2",
+            "form-MIN_NUM_FORMS": "0",
+            "form-MAX_NUM_FORMS": "1000",
+            "form-0-uuid": str(a.pk),
+            "form-0-load": "invalid",
+            "_save": "Save",
+        }
+        superuser = self._create_superuser("superuser")
+        self.client.force_login(superuser)
+        changelist_url = reverse("admin:admin_changelist_swallow_changelist")
+        response = self.client.post(changelist_url, data=data)
+        self.assertContains(response, "Error: Select swallow to change")
 
     def test_deterministic_order_for_unordered_model(self):
         """
@@ -1201,7 +1494,8 @@ class ChangeListTests(TestCase):
         check_results_order()
 
         # When an order field is defined but multiple records have the same
-        # value for that field, make sure everything gets ordered by -pk as well.
+        # value for that field, make sure everything gets ordered by -pk as
+        # well.
         UnorderedObjectAdmin.ordering = ["bool"]
         check_results_order()
 
@@ -1214,6 +1508,20 @@ class ChangeListTests(TestCase):
         check_results_order()
         UnorderedObjectAdmin.ordering = ["id", "bool"]
         check_results_order(ascending=True)
+
+    def test_ordering_from_model_meta(self):
+        Swallow.objects.create(origin="Swallow A", load=4, speed=2)
+        Swallow.objects.create(origin="Swallow B", load=2, speed=1)
+        Swallow.objects.create(origin="Swallow C", load=5, speed=1)
+        m = SwallowAdmin(Swallow, custom_site)
+        request = self._mocked_authenticated_request("/swallow/?o=", self.superuser)
+        changelist = m.get_changelist_instance(request)
+        queryset = changelist.get_queryset(request)
+        self.assertQuerySetEqual(
+            queryset,
+            [(1.0, 2.0), (1.0, 5.0), (2.0, 4.0)],
+            lambda s: (s.speed, s.load),
+        )
 
     def test_deterministic_order_for_model_ordered_by_its_manager(self):
         """
@@ -1248,7 +1556,8 @@ class ChangeListTests(TestCase):
         check_results_order(ascending=True)
 
         # When an order field is defined but multiple records have the same
-        # value for that field, make sure everything gets ordered by -pk as well.
+        # value for that field, make sure everything gets ordered by -pk as
+        # well.
         OrderedObjectAdmin.ordering = ["bool"]
         check_results_order()
 
@@ -1261,176 +1570,6 @@ class ChangeListTests(TestCase):
         check_results_order()
         OrderedObjectAdmin.ordering = ["id", "bool"]
         check_results_order(ascending=True)
-
-    @isolate_apps("admin_changelist")
-    def test_total_ordering_optimization(self):
-        class Related(models.Model):
-            unique_field = models.BooleanField(unique=True)
-
-            class Meta:
-                ordering = ("unique_field",)
-
-        class Model(models.Model):
-            unique_field = models.BooleanField(unique=True)
-            unique_nullable_field = models.BooleanField(unique=True, null=True)
-            related = models.ForeignKey(Related, models.CASCADE)
-            other_related = models.ForeignKey(Related, models.CASCADE)
-            related_unique = models.OneToOneField(Related, models.CASCADE)
-            field = models.BooleanField()
-            other_field = models.BooleanField()
-            null_field = models.BooleanField(null=True)
-
-            class Meta:
-                unique_together = {
-                    ("field", "other_field"),
-                    ("field", "null_field"),
-                    ("related", "other_related_id"),
-                }
-
-        class ModelAdmin(admin.ModelAdmin):
-            def get_queryset(self, request):
-                return Model.objects.none()
-
-        request = self._mocked_authenticated_request("/", self.superuser)
-        site = admin.AdminSite(name="admin")
-        model_admin = ModelAdmin(Model, site)
-        change_list = model_admin.get_changelist_instance(request)
-        tests = (
-            ([], ["-pk"]),
-            # Unique non-nullable field.
-            (["unique_field"], ["unique_field"]),
-            (["-unique_field"], ["-unique_field"]),
-            # Unique nullable field.
-            (["unique_nullable_field"], ["unique_nullable_field", "-pk"]),
-            # Field.
-            (["field"], ["field", "-pk"]),
-            # Related field introspection is not implemented.
-            (["related__unique_field"], ["related__unique_field", "-pk"]),
-            # Related attname unique.
-            (["related_unique_id"], ["related_unique_id"]),
-            # Related ordering introspection is not implemented.
-            (["related_unique"], ["related_unique", "-pk"]),
-            # Composite unique.
-            (["field", "-other_field"], ["field", "-other_field"]),
-            # Composite unique nullable.
-            (["-field", "null_field"], ["-field", "null_field", "-pk"]),
-            # Composite unique and nullable.
-            (
-                ["-field", "null_field", "other_field"],
-                ["-field", "null_field", "other_field"],
-            ),
-            # Composite unique attnames.
-            (["related_id", "-other_related_id"], ["related_id", "-other_related_id"]),
-            # Composite unique names.
-            (["related", "-other_related_id"], ["related", "-other_related_id", "-pk"]),
-        )
-        # F() objects composite unique.
-        total_ordering = [F("field"), F("other_field").desc(nulls_last=True)]
-        # F() objects composite unique nullable.
-        non_total_ordering = [F("field"), F("null_field").desc(nulls_last=True)]
-        tests += (
-            (total_ordering, total_ordering),
-            (non_total_ordering, non_total_ordering + ["-pk"]),
-        )
-        for ordering, expected in tests:
-            with self.subTest(ordering=ordering):
-                self.assertEqual(
-                    change_list._get_deterministic_ordering(ordering), expected
-                )
-
-    @isolate_apps("admin_changelist")
-    def test_total_ordering_optimization_meta_constraints(self):
-        class Related(models.Model):
-            unique_field = models.BooleanField(unique=True)
-
-            class Meta:
-                ordering = ("unique_field",)
-
-        class Model(models.Model):
-            field_1 = models.BooleanField()
-            field_2 = models.BooleanField()
-            field_3 = models.BooleanField()
-            field_4 = models.BooleanField()
-            field_5 = models.BooleanField()
-            field_6 = models.BooleanField()
-            nullable_1 = models.BooleanField(null=True)
-            nullable_2 = models.BooleanField(null=True)
-            related_1 = models.ForeignKey(Related, models.CASCADE)
-            related_2 = models.ForeignKey(Related, models.CASCADE)
-            related_3 = models.ForeignKey(Related, models.CASCADE)
-            related_4 = models.ForeignKey(Related, models.CASCADE)
-
-            class Meta:
-                constraints = [
-                    *[
-                        models.UniqueConstraint(fields=fields, name="".join(fields))
-                        for fields in (
-                            ["field_1"],
-                            ["nullable_1"],
-                            ["related_1"],
-                            ["related_2_id"],
-                            ["field_2", "field_3"],
-                            ["field_2", "nullable_2"],
-                            ["field_2", "related_3"],
-                            ["field_3", "related_4_id"],
-                        )
-                    ],
-                    models.CheckConstraint(check=models.Q(id__gt=0), name="foo"),
-                    models.UniqueConstraint(
-                        fields=["field_5"],
-                        condition=models.Q(id__gt=10),
-                        name="total_ordering_1",
-                    ),
-                    models.UniqueConstraint(
-                        fields=["field_6"],
-                        condition=models.Q(),
-                        name="total_ordering",
-                    ),
-                ]
-
-        class ModelAdmin(admin.ModelAdmin):
-            def get_queryset(self, request):
-                return Model.objects.none()
-
-        request = self._mocked_authenticated_request("/", self.superuser)
-        site = admin.AdminSite(name="admin")
-        model_admin = ModelAdmin(Model, site)
-        change_list = model_admin.get_changelist_instance(request)
-        tests = (
-            # Unique non-nullable field.
-            (["field_1"], ["field_1"]),
-            # Unique nullable field.
-            (["nullable_1"], ["nullable_1", "-pk"]),
-            # Related attname unique.
-            (["related_1_id"], ["related_1_id"]),
-            (["related_2_id"], ["related_2_id"]),
-            # Related ordering introspection is not implemented.
-            (["related_1"], ["related_1", "-pk"]),
-            # Composite unique.
-            (["-field_2", "field_3"], ["-field_2", "field_3"]),
-            # Composite unique nullable.
-            (["field_2", "-nullable_2"], ["field_2", "-nullable_2", "-pk"]),
-            # Composite unique and nullable.
-            (
-                ["field_2", "-nullable_2", "field_3"],
-                ["field_2", "-nullable_2", "field_3"],
-            ),
-            # Composite field and related field name.
-            (["field_2", "-related_3"], ["field_2", "-related_3", "-pk"]),
-            (["field_3", "related_4"], ["field_3", "related_4", "-pk"]),
-            # Composite field and related field attname.
-            (["field_2", "related_3_id"], ["field_2", "related_3_id"]),
-            (["field_3", "-related_4_id"], ["field_3", "-related_4_id"]),
-            # Partial unique constraint is ignored.
-            (["field_5"], ["field_5", "-pk"]),
-            # Unique constraint with an empty condition.
-            (["field_6"], ["field_6"]),
-        )
-        for ordering, expected in tests:
-            with self.subTest(ordering=ordering):
-                self.assertEqual(
-                    change_list._get_deterministic_ordering(ordering), expected
-                )
 
     def test_dynamic_list_filter(self):
         """
@@ -1513,7 +1652,7 @@ class ChangeListTests(TestCase):
         response = m.changelist_view(request)
         self.assertIn('<ul class="object-tools">', response.rendered_content)
         # The "Add" button inside the object-tools shouldn't appear.
-        self.assertNotIn("Add ", response.rendered_content)
+        self.assertNotIn("Add event", response.rendered_content)
 
     def test_search_help_text(self):
         superuser = self._create_superuser("superuser")
@@ -1537,8 +1676,126 @@ class ChangeListTests(TestCase):
         self.assertContains(
             response,
             '<input type="text" size="40" name="q" value="" id="searchbar" '
-            'autofocus aria-describedby="searchbar_helptext">',
+            'aria-describedby="searchbar_helptext">',
         )
+
+    def test_search_role(self):
+        m = BandAdmin(Band, custom_site)
+        m.search_fields = ["name"]
+        request = self._mocked_authenticated_request("/band/", self.superuser)
+        response = m.changelist_view(request)
+        self.assertContains(
+            response,
+            '<h2 id="changelist-search-form" class="visually-hidden">Search bands</h2>',
+        )
+        self.assertContains(
+            response,
+            '<form id="changelist-search" method="get" role="search" '
+            'aria-labelledby="changelist-search-form">',
+        )
+
+    def test_search_bar_total_link_preserves_options(self):
+        self.client.force_login(self.superuser)
+        url = reverse("admin:auth_user_changelist")
+        for data, href in (
+            ({"is_staff__exact": "0"}, "?"),
+            ({"is_staff__exact": "0", IS_POPUP_VAR: "1"}, f"?{IS_POPUP_VAR}=1"),
+            ({"is_staff__exact": "0", IS_FACETS_VAR: ""}, f"?{IS_FACETS_VAR}"),
+            (
+                {"is_staff__exact": "0", IS_POPUP_VAR: "1", IS_FACETS_VAR: ""},
+                f"?{IS_POPUP_VAR}=1&{IS_FACETS_VAR}",
+            ),
+        ):
+            with self.subTest(data=data):
+                response = self.client.get(url, data=data)
+                self.assertContains(
+                    response, f'0 results (<a href="{href}">1 total</a>)'
+                )
+
+    def test_list_display_related_field(self):
+        parent = Parent.objects.create(name="I am your father")
+        child = Child.objects.create(name="I am your child", parent=parent)
+        GrandChild.objects.create(name="I am your grandchild", parent=child)
+        request = self._mocked_authenticated_request("/grandchild/", self.superuser)
+
+        m = GrandChildAdmin(GrandChild, custom_site)
+        response = m.changelist_view(request)
+        self.assertContains(response, parent.name)
+        self.assertContains(response, child.name)
+
+    def test_list_display_related_field_null(self):
+        GrandChild.objects.create(name="I am parentless", parent=None)
+        request = self._mocked_authenticated_request("/grandchild/", self.superuser)
+
+        m = GrandChildAdmin(GrandChild, custom_site)
+        response = m.changelist_view(request)
+        self.assertContains(response, '<td class="field-parent__name">-</td>')
+        self.assertContains(response, '<td class="field-parent__parent__name">-</td>')
+
+    def test_list_display_related_field_ordering(self):
+        parent_a = Parent.objects.create(name="Alice")
+        parent_z = Parent.objects.create(name="Zara")
+        Child.objects.create(name="Alice's child", parent=parent_a)
+        Child.objects.create(name="Zara's child", parent=parent_z)
+
+        class ChildAdmin(admin.ModelAdmin):
+            list_display = ["name", "parent__name"]
+            list_per_page = 1
+
+        m = ChildAdmin(Child, custom_site)
+
+        # Order ascending.
+        request = self._mocked_authenticated_request("/grandchild/?o=1", self.superuser)
+        response = m.changelist_view(request)
+        self.assertContains(response, parent_a.name)
+        self.assertNotContains(response, parent_z.name)
+
+        # Order descending.
+        request = self._mocked_authenticated_request(
+            "/grandchild/?o=-1", self.superuser
+        )
+        response = m.changelist_view(request)
+        self.assertNotContains(response, parent_a.name)
+        self.assertContains(response, parent_z.name)
+
+    def test_list_display_related_field_ordering_fields(self):
+        class ChildAdmin(admin.ModelAdmin):
+            list_display = ["name", "parent__name"]
+            ordering = ["parent__name"]
+
+        m = ChildAdmin(Child, custom_site)
+        request = self._mocked_authenticated_request("/", self.superuser)
+        cl = m.get_changelist_instance(request)
+        self.assertEqual(cl.get_ordering_field_columns(), {2: "asc"})
+
+    def test_list_display_related_field_boolean_display(self):
+        """
+        Related boolean fields (parent__is_active) display boolean icons.
+        """
+        parent = Parent.objects.create(name="Test Parent")
+        child_active = Child.objects.create(
+            name="Active Child", parent=parent, is_active=True
+        )
+        child_inactive = Child.objects.create(
+            name="Inactive Child", parent=parent, is_active=False
+        )
+
+        class GrandChildAdmin(admin.ModelAdmin):
+            list_display = ["name", "parent__is_active"]
+
+        GrandChild.objects.create(name="GrandChild of Active", parent=child_active)
+        GrandChild.objects.create(name="GrandChild of Inactive", parent=child_inactive)
+
+        m = GrandChildAdmin(GrandChild, custom_site)
+        request = self._mocked_authenticated_request("/grandchild/", self.superuser)
+        response = m.changelist_view(request)
+
+        # Boolean icons are rendered using img tags with specific alt text.
+        self.assertContains(response, 'alt="True"')
+        self.assertContains(response, 'alt="False"')
+        # Ensure "True" and "False" text are NOT in the response.
+        self.assertNotContains(response, ">True<")
+        self.assertNotContains(response, ">False<")
 
 
 class GetAdminLogTests(TestCase):
@@ -1547,7 +1804,12 @@ class GetAdminLogTests(TestCase):
         {% get_admin_log %} works if the user model's primary key isn't named
         'id'.
         """
-        context = Context({"user": CustomIdUser()})
+        context = Context(
+            {
+                "user": CustomIdUser(),
+                "log_entries": LogEntry.objects.all(),
+            }
+        )
         template = Template(
             "{% load log %}{% get_admin_log 10 as admin_log for_user user %}"
         )
@@ -1558,8 +1820,8 @@ class GetAdminLogTests(TestCase):
         """{% get_admin_log %} works without specifying a user."""
         user = User(username="jondoe", password="secret", email="super@example.com")
         user.save()
-        ct = ContentType.objects.get_for_model(User)
-        LogEntry.objects.log_action(user.pk, ct.pk, user.pk, repr(user), 1)
+        LogEntry.objects.log_actions(user.pk, [user], 1)
+        context = Context({"log_entries": LogEntry.objects.all()})
         t = Template(
             "{% load log %}"
             "{% get_admin_log 100 as admin_log %}"
@@ -1567,7 +1829,7 @@ class GetAdminLogTests(TestCase):
             "{{ entry|safe }}"
             "{% endfor %}"
         )
-        self.assertEqual(t.render(Context({})), "Added “<User: jondoe>”.")
+        self.assertEqual(t.render(context), "Added “jondoe”.")
 
     def test_missing_args(self):
         msg = "'get_admin_log' statements require two arguments"
@@ -1594,7 +1856,6 @@ class GetAdminLogTests(TestCase):
 
 @override_settings(ROOT_URLCONF="admin_changelist.urls")
 class SeleniumTests(AdminSeleniumTestCase):
-
     available_apps = ["admin_changelist"] + AdminSeleniumTestCase.available_apps
 
     def setUp(self):
@@ -1672,6 +1933,41 @@ class SeleniumTests(AdminSeleniumTestCase):
         for c in checkboxes[:-2]:
             self.assertIs(c.get_property("checked"), True)
         self.assertIs(checkboxes[-1].get_property("checked"), False)
+
+    def test_selection_counter_is_synced_when_page_is_shown(self):
+        from selenium.webdriver.common.by import By
+
+        self.admin_login(username="super", password="secret")
+        self.selenium.get(self.live_server_url + reverse("admin:auth_user_changelist"))
+
+        form_id = "#changelist-form"
+        first_row_checkbox_selector = (
+            f"{form_id} #result_list tbody tr:first-child .action-select"
+        )
+        selection_indicator_selector = f"{form_id} .action-counter"
+        selection_indicator = self.selenium.find_element(
+            By.CSS_SELECTOR, selection_indicator_selector
+        )
+        row_checkbox = self.selenium.find_element(
+            By.CSS_SELECTOR, first_row_checkbox_selector
+        )
+        # Select a row.
+        row_checkbox.click()
+        self.assertEqual(selection_indicator.text, "1 of 1 selected")
+        # Go to another page and get back.
+        self.selenium.get(
+            self.live_server_url + reverse("admin:admin_changelist_parent_changelist")
+        )
+        self.selenium.back()
+        # The selection indicator is synced with the selected checkboxes.
+        selection_indicator = self.selenium.find_element(
+            By.CSS_SELECTOR, selection_indicator_selector
+        )
+        row_checkbox = self.selenium.find_element(
+            By.CSS_SELECTOR, first_row_checkbox_selector
+        )
+        selected_rows = 1 if row_checkbox.is_selected() else 0
+        self.assertEqual(selection_indicator.text, f"{selected_rows} of 1 selected")
 
     def test_select_all_across_pages(self):
         from selenium.webdriver.common.by import By
@@ -1862,3 +2158,78 @@ class SeleniumTests(AdminSeleniumTestCase):
                 "[data-filter-title='number of members']",
             ).get_attribute("open")
         )
+
+    def test_collapse_filter_with_unescaped_title(self):
+        from selenium.webdriver.common.by import By
+
+        self.admin_login(username="super", password="secret")
+        changelist_url = reverse("admin:admin_changelist_proxyuser_changelist")
+        self.selenium.get(self.live_server_url + changelist_url)
+        # Title is escaped.
+        filter_title = self.selenium.find_element(
+            By.CSS_SELECTOR, "[data-filter-title='It\\'s OK']"
+        )
+        filter_title.find_element(By.CSS_SELECTOR, "summary").click()
+        self.assertFalse(filter_title.get_attribute("open"))
+        # Filter is in the same state after refresh.
+        self.selenium.refresh()
+        self.assertFalse(
+            self.selenium.find_element(
+                By.CSS_SELECTOR, "[data-filter-title='It\\'s OK']"
+            ).get_attribute("open")
+        )
+
+    def test_list_display_ordering(self):
+        from selenium.webdriver.common.by import By
+
+        parent_a = Parent.objects.create(name="Parent A")
+        child_l = Child.objects.create(name="Child L", parent=None)
+        child_m = Child.objects.create(name="Child M", parent=parent_a)
+        GrandChild.objects.create(name="Grandchild X", parent=child_m)
+        GrandChild.objects.create(name="Grandchild Y", parent=child_l)
+        GrandChild.objects.create(name="Grandchild Z", parent=None)
+
+        self.admin_login(username="super", password="secret")
+        changelist_url = reverse("admin:admin_changelist_grandchild_changelist")
+        self.selenium.get(self.live_server_url + changelist_url)
+
+        def find_result_row_texts():
+            table = self.selenium.find_element(By.ID, "result_list")
+            # Drop header from the result list
+            return [row.text for row in table.find_elements(By.TAG_NAME, "tr")][1:]
+
+        def expected_from_queryset(qs):
+            return [
+                " ".join("-" if i is None else i for i in item)
+                for item in qs.values_list(
+                    "name", "parent__name", "parent__parent__name"
+                )
+            ]
+
+        cases = [
+            # Order ascending by `name`.
+            ("th.sortable.column-name", ("name",)),
+            # Order descending by `name`.
+            ("th.sortable.column-name", ("-name",)),
+            # Order ascending by `parent__name`.
+            ("th.sortable.column-parent__name", ("parent__name", "-name")),
+            # Order descending by `parent__name`.
+            ("th.sortable.column-parent__name", ("-parent__name", "-name")),
+            # Order ascending by `parent__parent__name`.
+            (
+                "th.sortable.column-parent__parent__name",
+                ("parent__parent__name", "-parent__name", "-name"),
+            ),
+            # Order descending by `parent__parent__name`.
+            (
+                "th.sortable.column-parent__parent__name",
+                ("-parent__parent__name", "-parent__name", "-name"),
+            ),
+        ]
+        for css_selector, ordering in cases:
+            with self.subTest(ordering=ordering):
+                self.selenium.find_element(By.CSS_SELECTOR, css_selector).click()
+                expected = expected_from_queryset(
+                    GrandChild.objects.all().order_by(*ordering)
+                )
+                self.assertEqual(find_result_row_texts(), expected)

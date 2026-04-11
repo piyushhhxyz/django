@@ -12,9 +12,11 @@ module. They are described in more detail in the `PostgreSQL docs
 .. note::
 
     All functions come without default aliases, so you must explicitly provide
-    one. For example::
+    one. For example:
 
-        >>> SomeModel.objects.aggregate(arr=ArrayAgg('somefield'))
+    .. code-block:: pycon
+
+        >>> SomeModel.objects.aggregate(arr=ArrayAgg("somefield"))
         {'arr': [0, 1, 2]}
 
 .. admonition:: Common aggregate options
@@ -28,7 +30,7 @@ General-purpose aggregation functions
 ``ArrayAgg``
 ------------
 
-.. class:: ArrayAgg(expression, distinct=False, filter=None, default=None, ordering=(), **extra)
+.. class:: ArrayAgg(expression, distinct=False, filter=None, default=None, order_by=(), **extra)
 
     Returns a list of values, including nulls, concatenated into an array, or
     ``default`` if there are no values.
@@ -38,7 +40,7 @@ General-purpose aggregation functions
         An optional boolean argument that determines if array values
         will be distinct. Defaults to ``False``.
 
-    .. attribute:: ordering
+    .. attribute:: order_by
 
         An optional string of a field name (with an optional ``"-"`` prefix
         which indicates descending order) or an expression (or a tuple or list
@@ -47,17 +49,10 @@ General-purpose aggregation functions
 
         Examples::
 
-            'some_field'
-            '-some_field'
             from django.db.models import F
-            F('some_field').desc()
 
-    .. deprecated:: 4.0
-
-        If there are no rows and ``default`` is not provided, ``ArrayAgg``
-        returns an empty list instead of ``None``. This behavior is deprecated
-        and will be removed in Django 5.0. If you need it, explicitly set
-        ``default`` to ``Value([])``.
+            ArrayAgg("a_field", order_by="-some_field")
+            ArrayAgg("a_field", order_by=F("some_field").desc())
 
 ``BitAnd``
 ----------
@@ -78,12 +73,10 @@ General-purpose aggregation functions
 ``BitXor``
 ----------
 
-.. versionadded:: 4.1
-
 .. class:: BitXor(expression, filter=None, default=None, **extra)
 
     Returns an ``int`` of the bitwise ``XOR`` of all non-null input values, or
-    ``default`` if all values are null. It requires PostgreSQL 14+.
+    ``default`` if all values are null.
 
 ``BoolAnd``
 -----------
@@ -100,9 +93,11 @@ General-purpose aggregation functions
             published = models.BooleanField()
             rank = models.IntegerField()
 
+    .. code-block:: pycon
+
         >>> from django.db.models import Q
         >>> from django.contrib.postgres.aggregates import BoolAnd
-        >>> Comment.objects.aggregate(booland=BoolAnd('published'))
+        >>> Comment.objects.aggregate(booland=BoolAnd("published"))
         {'booland': False}
         >>> Comment.objects.aggregate(booland=BoolAnd(Q(rank__lt=100)))
         {'booland': True}
@@ -122,9 +117,11 @@ General-purpose aggregation functions
             published = models.BooleanField()
             rank = models.IntegerField()
 
+    .. code-block:: pycon
+
         >>> from django.db.models import Q
         >>> from django.contrib.postgres.aggregates import BoolOr
-        >>> Comment.objects.aggregate(boolor=BoolOr('published'))
+        >>> Comment.objects.aggregate(boolor=BoolOr("published"))
         {'boolor': True}
         >>> Comment.objects.aggregate(boolor=BoolOr(Q(rank__gt=2)))
         {'boolor': False}
@@ -132,7 +129,7 @@ General-purpose aggregation functions
 ``JSONBAgg``
 ------------
 
-.. class:: JSONBAgg(expressions, distinct=False, filter=None, default=None, ordering=(), **extra)
+.. class:: JSONBAgg(expressions, distinct=False, filter=None, default=None, order_by=(), **extra)
 
     Returns the input values as a ``JSON`` array, or ``default`` if there are
     no values. You can query the result using :lookup:`key and index lookups
@@ -143,77 +140,111 @@ General-purpose aggregation functions
         An optional boolean argument that determines if array values will be
         distinct. Defaults to ``False``.
 
-    .. attribute:: ordering
+    .. attribute:: order_by
 
         An optional string of a field name (with an optional ``"-"`` prefix
         which indicates descending order) or an expression (or a tuple or list
         of strings and/or expressions) that specifies the ordering of the
         elements in the result list.
 
-        Examples are the same as for :attr:`ArrayAgg.ordering`.
+        Examples are the same as for :attr:`ArrayAgg.order_by`.
 
     Usage example::
 
         class Room(models.Model):
             number = models.IntegerField(unique=True)
 
-        class HotelReservation(model.Model):
-            room = models.ForeignKey('Room', on_delete=models.CASCADE)
+
+        class HotelReservation(models.Model):
+            room = models.ForeignKey("Room", on_delete=models.CASCADE)
             start = models.DateTimeField()
             end = models.DateTimeField()
             requirements = models.JSONField(blank=True, null=True)
 
+    .. code-block:: pycon
+
         >>> from django.contrib.postgres.aggregates import JSONBAgg
         >>> Room.objects.annotate(
         ...     requirements=JSONBAgg(
-        ...         'hotelreservation__requirements',
-        ...         ordering='-hotelreservation__start',
+        ...         "hotelreservation__requirements",
+        ...         order_by="-hotelreservation__start",
         ...     )
-        ... ).filter(requirements__0__sea_view=True).values('number', 'requirements')
+        ... ).filter(requirements__0__sea_view=True).values("number", "requirements")
         <QuerySet [{'number': 102, 'requirements': [
             {'parking': False, 'sea_view': True, 'double_bed': False},
             {'parking': True, 'double_bed': True}
         ]}]>
 
-    .. deprecated:: 4.0
-
-        If there are no rows and ``default`` is not provided, ``JSONBAgg``
-        returns an empty list instead of ``None``. This behavior is deprecated
-        and will be removed in Django 5.0. If you need it, explicitly set
-        ``default`` to ``Value('[]')``.
-
 ``StringAgg``
 -------------
 
-.. class:: StringAgg(expression, delimiter, distinct=False, filter=None, default=None, ordering=())
+.. class:: StringAgg(expression, delimiter, distinct=False, filter=None, default=None, order_by=())
+
+    .. deprecated:: 6.0
+
+        The PostgreSQL ``StringAgg`` class is deprecated in favor of the
+        generally available :class:`~django.db.models.StringAgg` class.
 
     Returns the input values concatenated into a string, separated by
     the ``delimiter`` string, or ``default`` if there are no values.
 
     .. attribute:: delimiter
 
-        Required argument. Needs to be a string.
+        Required argument. A string, :class:`~django.db.models.Value`, or
+        expression representing the string for separating values. For example,
+        ``Value(",")``.
+
+        .. versionadded:: 6.0
+
+            Support for providing a ``Value`` or expression rather than a
+            string was added.
+
+        .. deprecated:: 6.0
+
+            Support for providing a string is deprecated.
 
     .. attribute:: distinct
 
         An optional boolean argument that determines if concatenated values
         will be distinct. Defaults to ``False``.
 
-    .. attribute:: ordering
+    .. attribute:: order_by
 
         An optional string of a field name (with an optional ``"-"`` prefix
         which indicates descending order) or an expression (or a tuple or list
         of strings and/or expressions) that specifies the ordering of the
         elements in the result string.
 
-        Examples are the same as for :attr:`ArrayAgg.ordering`.
+        Examples are the same as for :attr:`ArrayAgg.order_by`.
 
-    .. deprecated:: 4.0
+    Usage example::
 
-        If there are no rows and ``default`` is not provided, ``StringAgg``
-        returns an empty string instead of ``None``. This behavior is
-        deprecated and will be removed in Django 5.0. If you need it,
-        explicitly set ``default`` to ``Value('')``.
+        class Publication(models.Model):
+            title = models.CharField(max_length=30)
+
+
+        class Article(models.Model):
+            headline = models.CharField(max_length=100)
+            publications = models.ManyToManyField(Publication)
+
+    .. code-block:: pycon
+
+        >>> article = Article.objects.create(headline="NASA uses Python")
+        >>> article.publications.create(title="The Python Journal")
+        <Publication: Publication object (1)>
+        >>> article.publications.create(title="Science News")
+        <Publication: Publication object (2)>
+        >>> from django.contrib.postgres.aggregates import StringAgg
+        >>> Article.objects.annotate(
+        ...     publication_names=StringAgg(
+        ...         "publications__title",
+        ...         delimiter=", ",
+        ...         order_by="publications__title",
+        ...     )
+        ... ).values("headline", "publication_names")
+        <QuerySet [{
+            'headline': 'NASA uses Python', 'publication_names': 'Science News, The Python Journal'
+        }]>
 
 Aggregate functions for statistics
 ==================================
@@ -328,7 +359,9 @@ field or an expression returning a numeric data. Both are required.
 Usage examples
 ==============
 
-We will use this example table::
+We will use this example table:
+
+.. code-block:: text
 
     | FIELD1 | FIELD2 | FIELD3 |
     |--------|--------|--------|
@@ -336,22 +369,26 @@ We will use this example table::
     |    bar |      2 | (null) |
     |   test |      3 |     13 |
 
+Here's some examples of some of the general-purpose aggregation functions:
 
-Here's some examples of some of the general-purpose aggregation functions::
+.. code-block:: pycon
 
-    >>> TestModel.objects.aggregate(result=StringAgg('field1', delimiter=';'))
+    >>> TestModel.objects.aggregate(result=StringAgg("field1", delimiter=";"))
     {'result': 'foo;bar;test'}
-    >>> TestModel.objects.aggregate(result=ArrayAgg('field2'))
+    >>> TestModel.objects.aggregate(result=ArrayAgg("field2"))
     {'result': [1, 2, 3]}
-    >>> TestModel.objects.aggregate(result=ArrayAgg('field1'))
+    >>> TestModel.objects.aggregate(result=ArrayAgg("field1"))
     {'result': ['foo', 'bar', 'test']}
 
 The next example shows the usage of statistical aggregate functions. The
 underlying math will be not described (you can read about this, for example, at
-`wikipedia <https://en.wikipedia.org/wiki/Regression_analysis>`_)::
+`wikipedia <https://en.wikipedia.org/wiki/Regression_analysis>`_):
 
-    >>> TestModel.objects.aggregate(count=RegrCount(y='field3', x='field2'))
+.. code-block:: pycon
+
+    >>> TestModel.objects.aggregate(count=RegrCount(y="field3", x="field2"))
     {'count': 2}
-    >>> TestModel.objects.aggregate(avgx=RegrAvgX(y='field3', x='field2'),
-    ...                             avgy=RegrAvgY(y='field3', x='field2'))
+    >>> TestModel.objects.aggregate(
+    ...     avgx=RegrAvgX(y="field3", x="field2"), avgy=RegrAvgY(y="field3", x="field2")
+    ... )
     {'avgx': 2, 'avgy': 13}

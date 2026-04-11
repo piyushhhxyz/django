@@ -1,4 +1,5 @@
 import datetime
+import os
 from decimal import Decimal
 
 from django.contrib.humanize.templatetags import humanize
@@ -9,10 +10,10 @@ from django.utils.html import escape
 from django.utils.timezone import get_fixed_timezone
 from django.utils.translation import gettext as _
 
+here = os.path.dirname(os.path.abspath(__file__))
 # Mock out datetime in some tests so they don't fail occasionally when they
 # run too slow. Use a fixed datetime for datetime.now(). DST change in
 # America/Chicago (the default time zone) happened on March 11th in 2012.
-
 now = datetime.datetime(2012, 3, 9, 22, 30)
 
 
@@ -55,6 +56,9 @@ class HumanizeTests(SimpleTestCase):
             "102",
             "103",
             "111",
+            "-0",
+            "-1",
+            "-105",
             "something else",
             None,
         )
@@ -70,6 +74,9 @@ class HumanizeTests(SimpleTestCase):
             "102nd",
             "103rd",
             "111th",
+            "0th",
+            "-1",
+            "-105",
             "something else",
             None,
         )
@@ -77,6 +84,7 @@ class HumanizeTests(SimpleTestCase):
         with translation.override("en"):
             self.humanize_tester(test_list, result_list, "ordinal")
 
+    @override_settings(LOCALE_PATHS=[os.path.join(here, "locale")])
     def test_i18n_html_ordinal(self):
         """Allow html in output on i18n strings"""
         test_list = (
@@ -87,6 +95,8 @@ class HumanizeTests(SimpleTestCase):
             "11",
             "12",
             "13",
+            "21",
+            "31",
             "101",
             "102",
             "103",
@@ -102,7 +112,9 @@ class HumanizeTests(SimpleTestCase):
             "11<sup>e</sup>",
             "12<sup>e</sup>",
             "13<sup>e</sup>",
-            "101<sup>er</sup>",
+            "21<sup>e</sup>",
+            "31<sup>e</sup>",
+            "101<sup>e</sup>",
             "102<sup>e</sup>",
             "103<sup>e</sup>",
             "111<sup>e</sup>",
@@ -116,39 +128,89 @@ class HumanizeTests(SimpleTestCase):
     def test_intcomma(self):
         test_list = (
             100,
+            -100,
             1000,
+            -1000,
             10123,
+            -10123,
             10311,
+            -10311,
             1000000,
+            -1000000,
             1234567.25,
+            -1234567.25,
             "100",
+            "-100",
+            "100.1",
+            "-100.1",
+            "100.13",
+            "-100.13",
             "1000",
+            "-1000",
             "10123",
+            "-10123",
             "10311",
+            "-10311",
+            "100000.13",
+            "-100000.13",
             "1000000",
+            "-1000000",
             "1234567.1234567",
+            "-1234567.1234567",
             Decimal("1234567.1234567"),
+            Decimal("-1234567.1234567"),
+            Decimal("Infinity"),
+            Decimal("-Infinity"),
+            Decimal("NaN"),
             None,
             "１２３４５６７",
+            "-１２３４５６７",
             "１２３４５６７.１２",
+            "-１２３４５６７.１２",
+            "the quick brown fox jumped over the lazy dog",
         )
         result_list = (
             "100",
+            "-100",
             "1,000",
+            "-1,000",
             "10,123",
+            "-10,123",
             "10,311",
+            "-10,311",
             "1,000,000",
+            "-1,000,000",
             "1,234,567.25",
+            "-1,234,567.25",
             "100",
+            "-100",
+            "100.1",
+            "-100.1",
+            "100.13",
+            "-100.13",
             "1,000",
+            "-1,000",
             "10,123",
+            "-10,123",
             "10,311",
+            "-10,311",
+            "100,000.13",
+            "-100,000.13",
             "1,000,000",
+            "-1,000,000",
             "1,234,567.1234567",
+            "-1,234,567.1234567",
             "1,234,567.1234567",
+            "-1,234,567.1234567",
+            "Infinity",
+            "-Infinity",
+            "NaN",
             None,
             "1,234,567",
-            "１,２３４,５６７.１２",
+            "-1,234,567",
+            "1,234,567.12",
+            "-1,234,567.12",
+            "the quick brown fox jumped over the lazy dog",
         )
         with translation.override("en"):
             self.humanize_tester(test_list, result_list, "intcomma")
@@ -156,43 +218,111 @@ class HumanizeTests(SimpleTestCase):
     def test_l10n_intcomma(self):
         test_list = (
             100,
+            -100,
             1000,
+            -1000,
             10123,
+            -10123,
             10311,
+            -10311,
             1000000,
+            -1000000,
             1234567.25,
+            -1234567.25,
             "100",
+            "-100",
             "1000",
+            "-1000",
             "10123",
+            "-10123",
             "10311",
+            "-10311",
             "1000000",
+            "-1000000",
             "1234567.1234567",
+            "-1234567.1234567",
             Decimal("1234567.1234567"),
+            -Decimal("1234567.1234567"),
             None,
             "１２３４５６７",
+            "-１２３４５６７",
             "１２３４５６７.１２",
+            "-１２３４５６７.１２",
+            "the quick brown fox jumped over the lazy dog",
         )
-        result_list = (
+        result_list_en = (
             "100",
+            "-100",
             "1,000",
+            "-1,000",
             "10,123",
+            "-10,123",
             "10,311",
+            "-10,311",
             "1,000,000",
+            "-1,000,000",
             "1,234,567.25",
+            "-1,234,567.25",
             "100",
+            "-100",
             "1,000",
+            "-1,000",
             "10,123",
+            "-10,123",
             "10,311",
+            "-10,311",
             "1,000,000",
+            "-1,000,000",
             "1,234,567.1234567",
+            "-1,234,567.1234567",
             "1,234,567.1234567",
+            "-1,234,567.1234567",
             None,
             "1,234,567",
-            "１,２３４,５６７.１２",
+            "-1,234,567",
+            "1,234,567.12",
+            "-1,234,567.12",
+            "the quick brown fox jumped over the lazy dog",
+        )
+        result_list_de = (
+            "100",
+            "-100",
+            "1.000",
+            "-1.000",
+            "10.123",
+            "-10.123",
+            "10.311",
+            "-10.311",
+            "1.000.000",
+            "-1.000.000",
+            "1.234.567,25",
+            "-1.234.567,25",
+            "100",
+            "-100",
+            "1.000",
+            "-1.000",
+            "10.123",
+            "-10.123",
+            "10.311",
+            "-10.311",
+            "1.000.000",
+            "-1.000.000",
+            "1.234.567,1234567",
+            "-1.234.567,1234567",
+            "1.234.567,1234567",
+            "-1.234.567,1234567",
+            None,
+            "1.234.567",
+            "-1.234.567",
+            "1.234.567,12",
+            "-1.234.567,12",
+            "the quick brown fox jumped over the lazy dog",
         )
         with self.settings(USE_THOUSAND_SEPARATOR=False):
             with translation.override("en"):
-                self.humanize_tester(test_list, result_list, "intcomma")
+                self.humanize_tester(test_list, result_list_en, "intcomma")
+            with translation.override("de"):
+                self.humanize_tester(test_list, result_list_de, "intcomma")
 
     def test_intcomma_without_number_grouping(self):
         # Regression for #17414
@@ -359,7 +489,7 @@ class HumanizeTests(SimpleTestCase):
     def test_naturalday_uses_localtime(self):
         # Regression for #18504
         # This is 2012-03-08HT19:30:00-06:00 in America/Chicago
-        dt = datetime.datetime(2012, 3, 9, 1, 30, tzinfo=datetime.timezone.utc)
+        dt = datetime.datetime(2012, 3, 9, 1, 30, tzinfo=datetime.UTC)
 
         orig_humanize_datetime, humanize.datetime = humanize.datetime, MockDateTime
         try:
@@ -396,7 +526,7 @@ class HumanizeTests(SimpleTestCase):
             now + datetime.timedelta(days=2, hours=6),
             now + datetime.timedelta(days=500),
             now.replace(tzinfo=naive()),
-            now.replace(tzinfo=datetime.timezone.utc),
+            now.replace(tzinfo=datetime.UTC),
         ]
         result_list = [
             "test",
@@ -492,8 +622,8 @@ class HumanizeTests(SimpleTestCase):
 
     def test_inflection_for_timedelta(self):
         """
-        Translation of '%d day'/'%d month'/… may differ depending on the context
-        of the string it is inserted in.
+        Translation of '%d day'/'%d month'/… may differ depending on the
+        context of the string it is inserted in.
         """
         test_list = [
             # "%(delta)s ago" translations
@@ -506,8 +636,8 @@ class HumanizeTests(SimpleTestCase):
             # "%(delta)s from now" translations
             now + datetime.timedelta(days=1),
             now + datetime.timedelta(days=2),
-            now + datetime.timedelta(days=30),
-            now + datetime.timedelta(days=60),
+            now + datetime.timedelta(days=31),
+            now + datetime.timedelta(days=61),
             now + datetime.timedelta(days=500),
             now + datetime.timedelta(days=865),
         ]

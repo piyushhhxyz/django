@@ -73,6 +73,13 @@ class Feature(NamedModel):
     geom = models.GeometryField()
 
 
+class ThreeDimensionalFeature(NamedModel):
+    geom = models.GeometryField(dim=3)
+
+    class Meta:
+        required_db_features = {"supports_3d_storage"}
+
+
 class MinusOneSRID(models.Model):
     geom = models.PointField(srid=-1)  # Minus one SRID.
 
@@ -95,3 +102,15 @@ class ManyPointModel(NamedModel):
     point1 = models.PointField()
     point2 = models.PointField()
     point3 = models.PointField(srid=3857)
+
+
+class Points(models.Model):
+    geom = models.MultiPointField()
+
+
+class Lines(models.Model):
+    geom = models.MultiLineStringField()
+
+
+class GeometryCollectionModel(models.Model):
+    geom = models.GeometryCollectionField()

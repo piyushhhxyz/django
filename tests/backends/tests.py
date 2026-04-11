@@ -1,9 +1,10 @@
 """Tests related to django.db.backends that haven't been organized."""
+
 import datetime
+import logging
 import threading
 import unittest
 import warnings
-from unittest import mock
 
 from django.core.management.color import no_style
 from django.db import (
@@ -18,6 +19,7 @@ from django.db import (
 from django.db.backends.base.base import BaseDatabaseWrapper
 from django.db.backends.signals import connection_created
 from django.db.backends.utils import CursorWrapper
+from django.db.models import BigAutoField, Value
 from django.db.models.sql.constants import CURSOR
 from django.test import (
     TestCase,
@@ -56,8 +58,8 @@ class DateQuotingTest(TestCase):
 
     def test_django_date_extract(self):
         """
-        Test the custom ``django_date_extract method``, in particular against fields
-        which clash with strings passed to it (e.g. 'day') (#12818).
+        Test the custom ``django_date_extract method``, in particular against
+        fields which clash with strings passed to it (e.g. 'day') (#12818).
         """
         updated = datetime.datetime(2010, 2, 20)
         SchoolClass.objects.create(year=2009, last_updated=updated)
@@ -72,8 +74,14 @@ class LastExecutedQueryTest(TestCase):
         last_executed_query should not raise an exception even if no previous
         query has been run.
         """
+        suffix = connection.features.bare_select_suffix
         with connection.cursor() as cursor:
+            if connection.vendor == "oracle":
+                cursor.statement = None
+            # No previous query has been run.
             connection.ops.last_executed_query(cursor, "", ())
+            # Previous query crashed.
+            connection.ops.last_executed_query(cursor, "SELECT %s" + suffix, (1,))
 
     def test_debug_sql(self):
         list(Reporter.objects.filter(first_name="test"))
@@ -83,7 +91,7 @@ class LastExecutedQueryTest(TestCase):
 
     def test_query_encoding(self):
         """last_executed_query() returns a string."""
-        data = RawData.objects.filter(raw_data=b"\x00\x46  \xFE").extra(
+        data = RawData.objects.filter(raw_data=b"\x00\x46  \xfe").extra(
             select={"föö": 1}
         )
         sql, params = data.query.sql_with_params()
@@ -101,6 +109,7 @@ class LastExecutedQueryTest(TestCase):
                 pk=1,
                 reporter__pk=9,
             ).exclude(reporter__pk__in=[2, 1]),
+            Article.objects.filter(pk__in=list(range(20, 31))),
         ):
             sql, params = qs.query.sql_with_params()
             with qs.query.get_compiler(DEFAULT_DB_ALIAS).execute_sql(CURSOR) as cursor:
@@ -123,6 +132,39 @@ class LastExecutedQueryTest(TestCase):
             self.assertEqual(
                 cursor.db.ops.last_executed_query(cursor, sql, params),
                 sql % params,
+            )
+
+    @skipUnlessDBFeature("supports_paramstyle_pyformat")
+    def test_last_executed_query_dict_overlap_keys(self):
+        square_opts = Square._meta
+        sql = "INSERT INTO %s (%s, %s) VALUES (%%(root)s, %%(root2)s)" % (
+            connection.introspection.identifier_converter(square_opts.db_table),
+            connection.ops.quote_name(square_opts.get_field("root").column),
+            connection.ops.quote_name(square_opts.get_field("square").column),
+        )
+        with connection.cursor() as cursor:
+            params = {"root": 2, "root2": 4}
+            cursor.execute(sql, params)
+            self.assertEqual(
+                cursor.db.ops.last_executed_query(cursor, sql, params),
+                sql % params,
+            )
+
+    def test_last_executed_query_with_duplicate_params(self):
+        square_opts = Square._meta
+        table = connection.introspection.identifier_converter(square_opts.db_table)
+        id_column = connection.ops.quote_name(square_opts.get_field("id").column)
+        root_column = connection.ops.quote_name(square_opts.get_field("root").column)
+        sql = f"UPDATE {table} SET {root_column} = %s + %s WHERE {id_column} = %s"
+        with connection.cursor() as cursor:
+            params = [42, 42, 1]
+            cursor.execute(sql, params)
+            last_executed_query = connection.ops.last_executed_query(
+                cursor, sql, params
+            )
+            self.assertEqual(
+                last_executed_query,
+                f"UPDATE {table} SET {root_column} = 42 + 42 WHERE {id_column} = 1",
             )
 
 
@@ -190,9 +232,13 @@ class LongNameTest(TransactionTestCase):
         connection.ops.execute_sql_flush(sql_list)
 
 
+@skipUnlessDBFeature("supports_sequence_reset")
 class SequenceResetTest(TestCase):
     def test_generic_relation(self):
-        "Sequence names are correct when resetting generic relations (Ref #13941)"
+        """
+        Sequence names are correct when resetting generic relations (Ref
+        #13941)
+        """
         # Create an object with a manually specified PK
         Post.objects.create(id=10, name="1st post", text="hello world")
 
@@ -213,7 +259,6 @@ class SequenceResetTest(TestCase):
 # This test needs to run outside of a transaction, otherwise closing the
 # connection would implicitly rollback and cause problems during teardown.
 class ConnectionCreatedSignalTest(TransactionTestCase):
-
     available_apps = []
 
     # Unfortunately with sqlite3 the in-memory test database cannot be closed,
@@ -263,7 +308,6 @@ class EscapingChecksDebug(EscapingChecks):
 
 
 class BackendTestCase(TransactionTestCase):
-
     available_apps = ["backends"]
 
     def create_squares_with_executemany(self, args):
@@ -420,7 +464,7 @@ class BackendTestCase(TransactionTestCase):
         with connection.cursor() as cursor:
             self.assertIsInstance(cursor, CursorWrapper)
         # Both InterfaceError and ProgrammingError seem to be used when
-        # accessing closed cursor (psycopg2 has InterfaceError, rest seem
+        # accessing closed cursor (psycopg has InterfaceError, rest seem
         # to use ProgrammingError).
         with self.assertRaises(connection.features.closed_cursor_error_class):
             # cursor should be closed, so no queries should be possible.
@@ -428,12 +472,12 @@ class BackendTestCase(TransactionTestCase):
 
     @unittest.skipUnless(
         connection.vendor == "postgresql",
-        "Psycopg2 specific cursor.closed attribute needed",
+        "Psycopg specific cursor.closed attribute needed",
     )
     def test_cursor_contextmanager_closing(self):
         # There isn't a generic way to test that cursors are closed, but
-        # psycopg2 offers us a way to check that by closed attribute.
-        # So, run only on psycopg2 for that reason.
+        # psycopg offers us a way to check that by closed attribute.
+        # So, run only on psycopg for that reason.
         with connection.cursor() as cursor:
             self.assertIsInstance(cursor, CursorWrapper)
         self.assertTrue(cursor.closed)
@@ -524,29 +568,47 @@ class BackendTestCase(TransactionTestCase):
                 "Limit for query logging exceeded, only the last 3 queries will be "
                 "returned."
             )
-            with self.assertWarnsMessage(UserWarning, msg):
+            with self.assertWarnsMessage(UserWarning, msg) as ctx:
                 self.assertEqual(3, len(new_connection.queries))
+            self.assertEqual(ctx.filename, __file__)
 
         finally:
             BaseDatabaseWrapper.queries_limit = old_queries_limit
             new_connection.close()
 
-    @mock.patch("django.db.backends.utils.logger")
     @override_settings(DEBUG=True)
-    def test_queries_logger(self, mocked_logger):
-        sql = "SELECT 1" + connection.features.bare_select_suffix
-        with connection.cursor() as cursor:
+    def test_queries_logger(self):
+        sql = "select 1" + connection.features.bare_select_suffix
+        with (
+            connection.cursor() as cursor,
+            self.assertLogs("django.db.backends", "DEBUG") as handler,
+        ):
             cursor.execute(sql)
-        params, kwargs = mocked_logger.debug.call_args
-        self.assertIn("; alias=%s", params[0])
-        self.assertEqual(params[2], sql)
-        self.assertIsNone(params[3])
-        self.assertEqual(params[4], connection.alias)
-        self.assertEqual(
-            list(kwargs["extra"]),
-            ["duration", "sql", "params", "alias"],
+        self.assertGreaterEqual(
+            records_len := len(handler.records),
+            1,
+            f"Wrong number of calls for {handler=} in (expected at least 1, got "
+            f"{records_len}).",
         )
-        self.assertEqual(tuple(kwargs["extra"].values()), params[1:])
+        record = handler.records[-1]
+        # Log raw message, effective level and args are correct.
+        self.assertEqual(record.msg, "(%.3f) %s; args=%s; alias=%s")
+        self.assertEqual(record.levelno, logging.DEBUG)
+        self.assertEqual(len(record.args), 4)
+        duration, logged_sql, params, alias = record.args
+        # Duration is hard to test without mocking time, expect under 1 second.
+        self.assertIsInstance(duration, float)
+        self.assertLess(duration, 1)
+        self.assertEqual(duration, record.duration)
+        # SQL is correct and not formatted.
+        self.assertEqual(logged_sql, sql)
+        self.assertNotEqual(logged_sql, connection.ops.format_debug_sql(sql))
+        self.assertEqual(logged_sql, record.sql)
+        # Params is None and alias is connection.alias.
+        self.assertIsNone(params)
+        self.assertIsNone(record.params)
+        self.assertEqual(alias, connection.alias)
+        self.assertEqual(alias, record.alias)
 
     def test_queries_bare_where(self):
         sql = f"SELECT 1{connection.features.bare_select_suffix} WHERE 1=1"
@@ -563,7 +625,6 @@ class BackendTestCase(TransactionTestCase):
 # These tests aren't conditional because it would require differentiating
 # between MySQL+InnoDB and MySQL+MYISAM (something we currently can't do).
 class FkConstraintsTests(TransactionTestCase):
-
     available_apps = ["backends"]
 
     def setUp(self):
@@ -680,7 +741,8 @@ class FkConstraintsTests(TransactionTestCase):
 
     def test_check_constraints(self):
         """
-        Constraint checks should raise an IntegrityError when bad data is in the DB.
+        Constraint checks should raise an IntegrityError when bad data is in
+        the DB.
         """
         with transaction.atomic():
             # Create an Article.
@@ -719,7 +781,6 @@ class FkConstraintsTests(TransactionTestCase):
 
 
 class ThreadTests(TransactionTestCase):
-
     available_apps = ["backends"]
 
     def test_default_connection_thread_local(self):
@@ -762,7 +823,8 @@ class ThreadTests(TransactionTestCase):
             # closed on teardown).
             for conn in connections_dict.values():
                 if conn is not connection and conn.allow_thread_sharing:
-                    conn.close()
+                    conn.validate_thread_sharing()
+                    conn._close()
                     conn.dec_thread_sharing()
 
     def test_connections_thread_local(self):
@@ -905,7 +967,7 @@ class ThreadTests(TransactionTestCase):
             connection.dec_thread_sharing()
 
 
-class MySQLPKZeroTests(TestCase):
+class MySQLAutoPKZeroTests(TestCase):
     """
     Zero as id for AutoField should raise exception in MySQL, because MySQL
     does not allow zero for autoincrement primary key if the
@@ -914,8 +976,15 @@ class MySQLPKZeroTests(TestCase):
 
     @skipIfDBFeature("allows_auto_pk_0")
     def test_zero_as_autoval(self):
-        with self.assertRaises(ValueError):
+        msg = "The database backend does not accept 0 as a value for AutoField."
+        with self.assertRaisesMessage(ValueError, msg):
             Square.objects.create(id=0, root=0, square=1)
+        with self.assertRaisesMessage(ValueError, msg):
+            Square.objects.create(id=Value(0, BigAutoField()), root=0, square=1)
+
+    @skipIfDBFeature("allows_auto_pk_0")
+    def test_no_error_when_filtering_with_expression(self):
+        self.assertSequenceEqual(Square.objects.filter(id=Value(0, BigAutoField())), ())
 
 
 class DBConstraintTestCase(TestCase):

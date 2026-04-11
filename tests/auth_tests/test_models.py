@@ -28,9 +28,18 @@ class NaturalKeysTestCase(TestCase):
         self.assertEqual(User.objects.get_by_natural_key("staff"), staff_user)
         self.assertEqual(staff_user.natural_key(), ("staff",))
 
+    async def test_auser_natural_key(self):
+        staff_user = await User.objects.acreate_user(username="staff")
+        self.assertEqual(await User.objects.aget_by_natural_key("staff"), staff_user)
+        self.assertEqual(staff_user.natural_key(), ("staff",))
+
     def test_group_natural_key(self):
         users_group = Group.objects.create(name="users")
         self.assertEqual(Group.objects.get_by_natural_key("users"), users_group)
+
+    async def test_agroup_natural_key(self):
+        users_group = await Group.objects.acreate(name="users")
+        self.assertEqual(await Group.objects.aget_by_natural_key("users"), users_group)
 
 
 class LoadDataWithoutNaturalKeysTestCase(TestCase):
@@ -120,8 +129,8 @@ class UserManagerTestCase(TransactionTestCase):
         self.assertFalse(user.has_usable_password())
 
     def test_create_user_email_domain_normalize_rfc3696(self):
-        # According to https://tools.ietf.org/html/rfc3696#section-3
-        # the "@" symbol can be part of the local part of an email address
+        # According to RFC 3696 Section 3 the "@" symbol can be part of the
+        # local part of an email address.
         returned = UserManager.normalize_email(r"Abc\@DEF@EXAMPLE.com")
         self.assertEqual(returned, r"Abc\@DEF@example.com")
 
@@ -155,6 +164,17 @@ class UserManagerTestCase(TransactionTestCase):
                 is_superuser=False,
             )
 
+    async def test_acreate_super_user_raises_error_on_false_is_superuser(self):
+        with self.assertRaisesMessage(
+            ValueError, "Superuser must have is_superuser=True."
+        ):
+            await User.objects.acreate_superuser(
+                username="test",
+                email="test@test.com",
+                password="test",
+                is_superuser=False,
+            )
+
     def test_create_superuser_raises_error_on_false_is_staff(self):
         with self.assertRaisesMessage(ValueError, "Superuser must have is_staff=True."):
             User.objects.create_superuser(
@@ -164,12 +184,14 @@ class UserManagerTestCase(TransactionTestCase):
                 is_staff=False,
             )
 
-    def test_make_random_password(self):
-        allowed_chars = "abcdefg"
-        password = UserManager().make_random_password(5, allowed_chars)
-        self.assertEqual(len(password), 5)
-        for char in password:
-            self.assertIn(char, allowed_chars)
+    async def test_acreate_superuser_raises_error_on_false_is_staff(self):
+        with self.assertRaisesMessage(ValueError, "Superuser must have is_staff=True."):
+            await User.objects.acreate_superuser(
+                username="test",
+                email="test@test.com",
+                password="test",
+                is_staff=False,
+            )
 
     def test_runpython_manager_methods(self):
         def forwards(apps, schema_editor):
@@ -304,6 +326,27 @@ class AbstractUserTestCase(TestCase):
         finally:
             hasher.iterations = old_iterations
 
+    @override_settings(PASSWORD_HASHERS=PASSWORD_HASHERS)
+    async def test_acheck_password_upgrade(self):
+        user = await User.objects.acreate_user(username="user", password="foo")
+        initial_password = user.password
+        self.assertIs(await user.acheck_password("foo"), True)
+        hasher = get_hasher("default")
+        self.assertEqual("pbkdf2_sha256", hasher.algorithm)
+
+        old_iterations = hasher.iterations
+        try:
+            # Upgrade the password iterations.
+            hasher.iterations = old_iterations + 1
+            with mock.patch(
+                "django.contrib.auth.password_validation.password_changed"
+            ) as pw_changed:
+                self.assertIs(await user.acheck_password("foo"), True)
+                self.assertEqual(pw_changed.call_count, 0)
+            self.assertNotEqual(initial_password, user.password)
+        finally:
+            hasher.iterations = old_iterations
+
 
 class CustomModelBackend(ModelBackend):
     def with_perm(
@@ -415,6 +458,13 @@ class UserWithPermTestCase(TestCase):
                 backend="invalid.backend.CustomModelBackend",
             )
 
+    def test_invalid_backend_submodule(self):
+        with self.assertRaises(ImportError):
+            User.objects.with_perm(
+                "auth.test",
+                backend="json.tool",
+            )
+
     @override_settings(
         AUTHENTICATION_BACKENDS=["auth_tests.test_models.CustomModelBackend"]
     )
@@ -501,9 +551,7 @@ class TestCreateSuperUserSignals(TestCase):
     def setUp(self):
         self.signals_count = 0
         post_save.connect(self.post_save_listener, sender=User)
-
-    def tearDown(self):
-        post_save.disconnect(self.post_save_listener, sender=User)
+        self.addCleanup(post_save.disconnect, self.post_save_listener, sender=User)
 
     def test_create_user(self):
         User.objects.create_user("JohnDoe")
@@ -533,6 +581,12 @@ class AnonymousUserTests(SimpleTestCase):
         self.assertEqual(self.user.user_permissions.count(), 0)
         self.assertEqual(self.user.get_user_permissions(), set())
         self.assertEqual(self.user.get_group_permissions(), set())
+
+    async def test_properties_async_versions(self):
+        self.assertEqual(await self.user.groups.acount(), 0)
+        self.assertEqual(await self.user.user_permissions.acount(), 0)
+        self.assertEqual(await self.user.aget_user_permissions(), set())
+        self.assertEqual(await self.user.aget_group_permissions(), set())
 
     def test_str(self):
         self.assertEqual(str(self.user), "AnonymousUser")
@@ -579,5 +633,9 @@ class PermissionTests(TestCase):
     def test_str(self):
         p = Permission.objects.get(codename="view_customemailfield")
         self.assertEqual(
-            str(p), "auth_tests | custom email field | Can view custom email field"
+            str(p), "Auth_Tests | custom email field | Can view custom email field"
         )
+
+    def test_user_perm_str(self):
+        p = Permission.objects.get(codename="view_customemailfield")
+        self.assertEqual(p.user_perm_str, "auth_tests.view_customemailfield")

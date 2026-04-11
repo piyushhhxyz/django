@@ -4,13 +4,12 @@ from datetime import date
 from django.contrib.sitemaps import Sitemap
 from django.contrib.sites.models import Site
 from django.core.exceptions import ImproperlyConfigured
-from django.test import ignore_warnings, modify_settings, override_settings
+from django.test import modify_settings, override_settings
 from django.utils import translation
-from django.utils.deprecation import RemovedInDjango50Warning
 from django.utils.formats import localize
 
 from .base import SitemapTestsBase
-from .models import TestModel
+from .models import I18nTestModel, TestModel
 
 
 class HTTPSitemapTests(SitemapTestsBase):
@@ -30,7 +29,7 @@ class HTTPSitemapTests(SitemapTestsBase):
             self.base_url,
             date.today(),
         )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
 
     def test_sitemap_not_callable(self):
         """A sitemap may not be callable."""
@@ -43,7 +42,7 @@ class HTTPSitemapTests(SitemapTestsBase):
             self.base_url,
             date.today(),
         )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
 
     def test_paged_sitemap(self):
         """A sitemap may have multiple pages."""
@@ -52,10 +51,8 @@ class HTTPSitemapTests(SitemapTestsBase):
 <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 <sitemap><loc>{0}/simple/sitemap-simple.xml</loc><lastmod>{1}</lastmod></sitemap><sitemap><loc>{0}/simple/sitemap-simple.xml?p=2</loc><lastmod>{1}</lastmod></sitemap>
 </sitemapindex>
-""".format(
-            self.base_url, date.today()
-        )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+""".format(self.base_url, date.today())
+        self.assertXMLEqual(response.text, expected_content)
 
     @override_settings(
         TEMPLATES=[
@@ -69,7 +66,7 @@ class HTTPSitemapTests(SitemapTestsBase):
         "A simple sitemap index can be rendered with a custom template"
         response = self.client.get("/simple/custom-lastmod-index.xml")
         expected_content = """<?xml version="1.0" encoding="UTF-8"?>
-<!-- This is a customised template -->
+<!-- This is a customized template -->
 <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 <sitemap><loc>%s/simple/sitemap-simple.xml</loc><lastmod>%s</lastmod></sitemap>
 </sitemapindex>
@@ -77,7 +74,7 @@ class HTTPSitemapTests(SitemapTestsBase):
             self.base_url,
             date.today(),
         )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
 
     def test_simple_sitemap_section(self):
         "A simple sitemap section can be rendered"
@@ -93,7 +90,7 @@ class HTTPSitemapTests(SitemapTestsBase):
             self.base_url,
             date.today(),
         )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
 
     def test_no_section(self):
         response = self.client.get("/simple/sitemap-simple2.xml")
@@ -127,7 +124,7 @@ class HTTPSitemapTests(SitemapTestsBase):
             self.base_url,
             date.today(),
         )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
 
     @override_settings(
         TEMPLATES=[
@@ -141,7 +138,7 @@ class HTTPSitemapTests(SitemapTestsBase):
         "A simple sitemap can be rendered with a custom template"
         response = self.client.get("/simple/custom-sitemap.xml")
         expected_content = """<?xml version="1.0" encoding="UTF-8"?>
-<!-- This is a customised template -->
+<!-- This is a customized template -->
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 <url><loc>%s/location/</loc><lastmod>%s</lastmod><changefreq>never</changefreq><priority>0.5</priority></url>
 </urlset>
@@ -149,7 +146,7 @@ class HTTPSitemapTests(SitemapTestsBase):
             self.base_url,
             date.today(),
         )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
 
     def test_sitemap_last_modified(self):
         "Last-Modified header is set correctly"
@@ -225,7 +222,7 @@ class HTTPSitemapTests(SitemapTestsBase):
 
     def test_sitemap_get_latest_lastmod_none(self):
         """
-        sitemapindex.lastmod is ommitted when Sitemap.lastmod is
+        sitemapindex.lastmod is omitted when Sitemap.lastmod is
         callable and Sitemap.get_latest_lastmod is not implemented
         """
         response = self.client.get("/lastmod/get-latest-lastmod-none-sitemap.xml")
@@ -269,9 +266,8 @@ class HTTPSitemapTests(SitemapTestsBase):
             "<changefreq>never</changefreq><priority>0.5</priority></url>\n"
             "</urlset>"
         ) % date.today()
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
 
-    @ignore_warnings(category=RemovedInDjango50Warning)
     def test_sitemap_get_urls_no_site_1(self):
         """
         Check we get ImproperlyConfigured if we don't pass a site object to
@@ -282,7 +278,6 @@ class HTTPSitemapTests(SitemapTestsBase):
             Sitemap().get_urls()
 
     @modify_settings(INSTALLED_APPS={"remove": "django.contrib.sites"})
-    @ignore_warnings(category=RemovedInDjango50Warning)
     def test_sitemap_get_urls_no_site_2(self):
         """
         Check we get ImproperlyConfigured when we don't pass a site object to
@@ -292,7 +287,6 @@ class HTTPSitemapTests(SitemapTestsBase):
         with self.assertRaisesMessage(ImproperlyConfigured, self.use_sitemap_err_msg):
             Sitemap().get_urls()
 
-    @ignore_warnings(category=RemovedInDjango50Warning)
     def test_sitemap_item(self):
         """
         Check to make sure that the raw item is included with each
@@ -320,7 +314,7 @@ class HTTPSitemapTests(SitemapTestsBase):
             self.base_url,
             date.today(),
         )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
 
     def test_x_robots_sitemap(self):
         response = self.client.get("/simple/index.xml")
@@ -350,7 +344,7 @@ class HTTPSitemapTests(SitemapTestsBase):
             "<changefreq>never</changefreq><priority>0.5</priority></url>\n"
             "</urlset>"
         ).format(self.base_url, self.i18n_model.pk)
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
 
     @override_settings(LANGUAGES=(("en", "English"), ("pt", "Portuguese")))
     def test_alternate_i18n_sitemap_index(self):
@@ -368,9 +362,7 @@ class HTTPSitemapTests(SitemapTestsBase):
 <xhtml:link rel="alternate" hreflang="en" href="{url}/en/i18n/testmodel/{pk}/"/>
 <xhtml:link rel="alternate" hreflang="pt" href="{url}/pt/i18n/testmodel/{pk}/"/>
 </url>
-""".replace(
-            "\n", ""
-        )
+""".replace("\n", "")
         expected_content = (
             f'<?xml version="1.0" encoding="UTF-8"?>\n'
             f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
@@ -378,7 +370,7 @@ class HTTPSitemapTests(SitemapTestsBase):
             f"{expected_urls}\n"
             f"</urlset>"
         )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
 
     @override_settings(
         LANGUAGES=(("en", "English"), ("pt", "Portuguese"), ("es", "Spanish"))
@@ -398,9 +390,7 @@ class HTTPSitemapTests(SitemapTestsBase):
 <xhtml:link rel="alternate" hreflang="en" href="{url}/en/i18n/testmodel/{pk}/"/>
 <xhtml:link rel="alternate" hreflang="es" href="{url}/es/i18n/testmodel/{pk}/"/>
 </url>
-""".replace(
-            "\n", ""
-        )
+""".replace("\n", "")
         expected_content = (
             f'<?xml version="1.0" encoding="UTF-8"?>\n'
             f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
@@ -408,7 +398,7 @@ class HTTPSitemapTests(SitemapTestsBase):
             f"{expected_urls}\n"
             f"</urlset>"
         )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
 
     @override_settings(LANGUAGES=(("en", "English"), ("pt", "Portuguese")))
     def test_alternate_i18n_sitemap_xdefault(self):
@@ -428,8 +418,32 @@ class HTTPSitemapTests(SitemapTestsBase):
 <xhtml:link rel="alternate" hreflang="pt" href="{url}/pt/i18n/testmodel/{pk}/"/>
 <xhtml:link rel="alternate" hreflang="x-default" href="{url}/i18n/testmodel/{pk}/"/>
 </url>
-""".replace(
-            "\n", ""
+""".replace("\n", "")
+        expected_content = (
+            f'<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
+            f'xmlns:xhtml="http://www.w3.org/1999/xhtml">\n'
+            f"{expected_urls}\n"
+            f"</urlset>"
+        )
+        self.assertXMLEqual(response.text, expected_content)
+
+    @override_settings(LANGUAGES=(("en", "English"), ("pt", "Portuguese")))
+    def test_language_for_item_i18n_sitemap(self):
+        """
+        A i18n sitemap index in which item can be chosen to be displayed for a
+        lang or not.
+        """
+        only_pt = I18nTestModel.objects.create(name="Only for PT")
+        response = self.client.get("/item-by-lang/i18n.xml")
+        url, pk, only_pt_pk = self.base_url, self.i18n_model.pk, only_pt.pk
+        expected_urls = (
+            f"<url><loc>{url}/en/i18n/testmodel/{pk}/</loc>"
+            f"<changefreq>never</changefreq><priority>0.5</priority></url>"
+            f"<url><loc>{url}/pt/i18n/testmodel/{pk}/</loc>"
+            f"<changefreq>never</changefreq><priority>0.5</priority></url>"
+            f"<url><loc>{url}/pt/i18n/testmodel/{only_pt_pk}/</loc>"
+            f"<changefreq>never</changefreq><priority>0.5</priority></url>"
         )
         expected_content = (
             f'<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -438,7 +452,47 @@ class HTTPSitemapTests(SitemapTestsBase):
             f"{expected_urls}\n"
             f"</urlset>"
         )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
+
+    @override_settings(LANGUAGES=(("en", "English"), ("pt", "Portuguese")))
+    def test_alternate_language_for_item_i18n_sitemap(self):
+        """
+        A i18n sitemap index in which item can be chosen to be displayed for a
+        lang or not.
+        """
+        only_pt = I18nTestModel.objects.create(name="Only for PT")
+        response = self.client.get("/item-by-lang-alternates/i18n.xml")
+        url, pk, only_pt_pk = self.base_url, self.i18n_model.pk, only_pt.pk
+        expected_urls = (
+            f"<url><loc>{url}/en/i18n/testmodel/{pk}/</loc>"
+            f"<changefreq>never</changefreq><priority>0.5</priority>"
+            f'<xhtml:link rel="alternate" '
+            f'hreflang="en" href="{url}/en/i18n/testmodel/{pk}/"/>'
+            f'<xhtml:link rel="alternate" '
+            f'hreflang="pt" href="{url}/pt/i18n/testmodel/{pk}/"/>'
+            f'<xhtml:link rel="alternate" '
+            f'hreflang="x-default" href="{url}/i18n/testmodel/{pk}/"/></url>'
+            f"<url><loc>{url}/pt/i18n/testmodel/{pk}/</loc>"
+            f"<changefreq>never</changefreq><priority>0.5</priority>"
+            f'<xhtml:link rel="alternate" '
+            f'hreflang="en" href="{url}/en/i18n/testmodel/{pk}/"/>'
+            f'<xhtml:link rel="alternate" '
+            f'hreflang="pt" href="{url}/pt/i18n/testmodel/{pk}/"/>'
+            f'<xhtml:link rel="alternate" '
+            f'hreflang="x-default" href="{url}/i18n/testmodel/{pk}/"/></url>'
+            f"<url><loc>{url}/pt/i18n/testmodel/{only_pt_pk}/</loc>"
+            f"<changefreq>never</changefreq><priority>0.5</priority>"
+            f'<xhtml:link rel="alternate" '
+            f'hreflang="pt" href="{url}/pt/i18n/testmodel/{only_pt_pk}/"/></url>'
+        )
+        expected_content = (
+            f'<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
+            f'xmlns:xhtml="http://www.w3.org/1999/xhtml">\n'
+            f"{expected_urls}\n"
+            f"</urlset>"
+        )
+        self.assertXMLEqual(response.text, expected_content)
 
     def test_sitemap_without_entries(self):
         response = self.client.get("/sitemap-without-entries/sitemap.xml")
@@ -448,7 +502,7 @@ class HTTPSitemapTests(SitemapTestsBase):
             'xmlns:xhtml="http://www.w3.org/1999/xhtml">\n\n'
             "</urlset>"
         )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+        self.assertXMLEqual(response.text, expected_content)
 
     def test_callable_sitemod_partial(self):
         """
@@ -473,8 +527,8 @@ class HTTPSitemapTests(SitemapTestsBase):
             "<loc>http://example.com/location/</loc></url>\n"
             "</urlset>"
         )
-        self.assertXMLEqual(index_response.content.decode(), expected_content_index)
-        self.assertXMLEqual(sitemap_response.content.decode(), expected_content_sitemap)
+        self.assertXMLEqual(index_response.text, expected_content_index)
+        self.assertXMLEqual(sitemap_response.text, expected_content_sitemap)
 
     def test_callable_sitemod_full(self):
         """
@@ -504,46 +558,15 @@ class HTTPSitemapTests(SitemapTestsBase):
             "<lastmod>2014-03-13</lastmod></url>\n"
             "</urlset>"
         )
-        self.assertXMLEqual(index_response.content.decode(), expected_content_index)
-        self.assertXMLEqual(sitemap_response.content.decode(), expected_content_sitemap)
+        self.assertXMLEqual(index_response.text, expected_content_index)
+        self.assertXMLEqual(sitemap_response.text, expected_content_sitemap)
 
-
-# RemovedInDjango50Warning
-class DeprecatedTests(SitemapTestsBase):
-    @override_settings(
-        TEMPLATES=[
-            {
-                "BACKEND": "django.template.backends.django.DjangoTemplates",
-                "DIRS": [os.path.join(os.path.dirname(__file__), "templates")],
-            }
-        ]
-    )
-    def test_simple_sitemap_custom_index_warning(self):
-        msg = (
-            "Calling `__str__` on SitemapIndexItem is deprecated, use the `location` "
-            "attribute instead."
-        )
-        with self.assertRaisesMessage(RemovedInDjango50Warning, msg):
-            self.client.get("/simple/custom-index.xml")
-
-    @ignore_warnings(category=RemovedInDjango50Warning)
-    @override_settings(
-        TEMPLATES=[
-            {
-                "BACKEND": "django.template.backends.django.DjangoTemplates",
-                "DIRS": [os.path.join(os.path.dirname(__file__), "templates")],
-            }
-        ]
-    )
-    def test_simple_sitemap_custom_index(self):
-        "A simple sitemap index can be rendered with a custom template"
-        response = self.client.get("/simple/custom-index.xml")
-        expected_content = """<?xml version="1.0" encoding="UTF-8"?>
-    <!-- This is a customised template -->
-    <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-    <sitemap><loc>%s/simple/sitemap-simple.xml</loc></sitemap>
-    </sitemapindex>
-    """ % (
-            self.base_url
-        )
-        self.assertXMLEqual(response.content.decode(), expected_content)
+    def test_callable_sitemod_no_items(self):
+        index_response = self.client.get("/callable-lastmod-no-items/index.xml")
+        self.assertNotIn("Last-Modified", index_response)
+        expected_content_index = """<?xml version="1.0" encoding="UTF-8"?>
+        <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+        <sitemap><loc>http://example.com/simple/sitemap-callable-lastmod.xml</loc></sitemap>
+        </sitemapindex>
+        """
+        self.assertXMLEqual(index_response.text, expected_content_index)

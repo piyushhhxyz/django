@@ -1,10 +1,11 @@
+import sys
 from datetime import date
 
 from django.forms import DateField, Form, SelectDateWidget
-from django.test import ignore_warnings, override_settings
+from django.test import override_settings
 from django.utils import translation
 from django.utils.dates import MONTHS_AP
-from django.utils.deprecation import RemovedInDjango50Warning
+from django.utils.version import PYPY
 
 from .base import WidgetTest
 
@@ -31,8 +32,7 @@ class SelectDateWidgetTest(WidgetTest):
             self.widget,
             "mydate",
             "",
-            html=(
-                """
+            html=("""
             <select name="mydate_month" id="id_mydate_month">
                 <option selected value="">---</option>
                 <option value="1">January</option>
@@ -97,8 +97,7 @@ class SelectDateWidgetTest(WidgetTest):
                 <option value="2015">2015</option>
                 <option value="2016">2016</option>
             </select>
-            """
-            ),
+            """),
         )
 
     def test_render_none(self):
@@ -115,8 +114,7 @@ class SelectDateWidgetTest(WidgetTest):
             self.widget,
             "mydate",
             "2010-04-15",
-            html=(
-                """
+            html=("""
             <select name="mydate_month" id="id_mydate_month">
                 <option value="">---</option>
                 <option value="1">January</option>
@@ -181,8 +179,7 @@ class SelectDateWidgetTest(WidgetTest):
                 <option value="2015">2015</option>
                 <option value="2016">2016</option>
             </select>
-            """
-            ),
+            """),
         )
 
     def test_render_datetime(self):
@@ -199,8 +196,7 @@ class SelectDateWidgetTest(WidgetTest):
             self.widget,
             "mydate",
             "2010-02-31",
-            html=(
-                """
+            html=("""
             <select name="mydate_month" id="id_mydate_month">
                 <option value="">---</option>
                 <option value="1">January</option>
@@ -265,8 +261,7 @@ class SelectDateWidgetTest(WidgetTest):
                 <option value="2015">2015</option>
                 <option value="2016">2016</option>
             </select>
-            """
-            ),
+            """),
         )
 
     def test_custom_months(self):
@@ -275,8 +270,7 @@ class SelectDateWidgetTest(WidgetTest):
             widget,
             "mydate",
             "",
-            html=(
-                """
+            html=("""
             <select name="mydate_month" id="id_mydate_month">
                 <option selected value="">---</option>
                 <option value="1">Jan.</option>
@@ -332,8 +326,7 @@ class SelectDateWidgetTest(WidgetTest):
                 <option selected value="">---</option>
                 <option value="2013">2013</option>
             </select>
-            """
-            ),
+            """),
         )
 
     def test_selectdate_required(self):
@@ -542,32 +535,28 @@ class SelectDateWidgetTest(WidgetTest):
             "13-08-0001",
         )
 
-    # RemovedInDjango50Warning: When the deprecation ends, remove
-    # @ignore_warnings and USE_L10N=False. The test should remain because
-    # format-related settings will take precedence over locale-dictated
-    # formats.
-    @ignore_warnings(category=RemovedInDjango50Warning)
-    @override_settings(USE_L10N=False, DATE_INPUT_FORMATS=["%d.%m.%Y"])
+    @override_settings(DATE_INPUT_FORMATS=["%d.%m.%Y"])
     def test_custom_input_format(self):
         w = SelectDateWidget(years=("0001", "1899", "2009", "2010"))
-        for values, expected_value in (
-            (("0001", "8", "13"), "13.08.0001"),
-            (("1899", "7", "11"), "11.07.1899"),
-            (("2009", "3", "7"), "07.03.2009"),
-        ):
-            with self.subTest(values=values):
-                data = {
-                    "field_%s" % field: value
-                    for field, value in zip(("year", "month", "day"), values)
-                }
-                self.assertEqual(
-                    w.value_from_datadict(data, {}, "field"), expected_value
-                )
-                expected_dict = {
-                    field: int(value)
-                    for field, value in zip(("year", "month", "day"), values)
-                }
-                self.assertEqual(w.format_value(expected_value), expected_dict)
+        with translation.override(None):
+            for values, expected_value in (
+                (("0001", "8", "13"), "13.08.0001"),
+                (("1899", "7", "11"), "11.07.1899"),
+                (("2009", "3", "7"), "07.03.2009"),
+            ):
+                with self.subTest(values=values):
+                    data = {
+                        "field_%s" % field: value
+                        for field, value in zip(("year", "month", "day"), values)
+                    }
+                    self.assertEqual(
+                        w.value_from_datadict(data, {}, "field"), expected_value
+                    )
+                    expected_dict = {
+                        field: int(value)
+                        for field, value in zip(("year", "month", "day"), values)
+                    }
+                    self.assertEqual(w.format_value(expected_value), expected_dict)
 
     def test_format_value(self):
         valid_formats = [
@@ -615,6 +604,11 @@ class SelectDateWidgetTest(WidgetTest):
             ((None, "12", "1"), None),
             (("2000", None, "1"), None),
             (("2000", "12", None), None),
+            (
+                (str(sys.maxsize + 1), "12", "1"),
+                # PyPy does not raise OverflowError.
+                f"{sys.maxsize + 1}-12-1" if PYPY else "0-0-0",
+            ),
         ]
         for values, expected in tests:
             with self.subTest(values=values):
@@ -649,8 +643,7 @@ class SelectDateWidgetTest(WidgetTest):
             widget,
             "mydate",
             "",
-            html=(
-                """
+            html=("""
             <select name="mydate_month" id="id_mydate_month">
                 <option selected value="">---</option>
                 <option value="1">January</option>
@@ -704,8 +697,7 @@ class SelectDateWidgetTest(WidgetTest):
                 <option selected value="">---</option>
                 <option value="2007">2007</option>
             </select>
-            """
-            ),
+            """),
         )
 
     def test_fieldset(self):
@@ -716,7 +708,7 @@ class SelectDateWidgetTest(WidgetTest):
         form = TestForm()
         self.assertIs(self.widget.use_fieldset, True)
         self.assertHTMLEqual(
-            '<div><fieldset><legend for="id_field_month">Field:</legend>'
+            "<div><fieldset><legend>Field:</legend>"
             '<select name="field_month" required id="id_field_month">'
             '<option value="1">January</option><option value="2">February</option>'
             '<option value="3">March</option><option value="4">April</option>'

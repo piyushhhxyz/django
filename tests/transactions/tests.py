@@ -226,9 +226,27 @@ class AtomicTests(TransactionTestCase):
             transaction.savepoint_rollback(sid)
         self.assertSequenceEqual(Reporter.objects.all(), [reporter])
 
+    @skipUnlessDBFeature("can_release_savepoints")
+    def test_failure_on_exit_transaction(self):
+        with transaction.atomic():
+            with self.assertRaises(DatabaseError):
+                with transaction.atomic():
+                    Reporter.objects.create(last_name="Tintin")
+                    self.assertEqual(len(Reporter.objects.all()), 1)
+                    # Incorrect savepoint id to provoke a database error.
+                    connection.savepoint_ids.append("12")
+            with self.assertRaises(transaction.TransactionManagementError):
+                len(Reporter.objects.all())
+            self.assertIs(connection.needs_rollback, True)
+            if connection.savepoint_ids:
+                connection.savepoint_ids.pop()
+        self.assertSequenceEqual(Reporter.objects.all(), [])
+
 
 class AtomicInsideTransactionTests(AtomicTests):
-    """All basic tests for atomic should also pass within an existing transaction."""
+    """
+    All basic tests for atomic should also pass within an existing transaction.
+    """
 
     def setUp(self):
         self.atomic = transaction.atomic()
@@ -239,16 +257,16 @@ class AtomicInsideTransactionTests(AtomicTests):
 
 
 class AtomicWithoutAutocommitTests(AtomicTests):
-    """All basic tests for atomic should also pass when autocommit is turned off."""
+    """
+    All basic tests for atomic should also pass when autocommit is turned off.
+    """
 
     def setUp(self):
         transaction.set_autocommit(False)
-
-    def tearDown(self):
+        self.addCleanup(transaction.set_autocommit, True)
         # The tests access the database after exercising 'atomic', initiating
         # a transaction ; a rollback is required before restoring autocommit.
-        transaction.rollback()
-        transaction.set_autocommit(True)
+        self.addCleanup(transaction.rollback)
 
 
 @skipUnlessDBFeature("uses_savepoints")
@@ -303,7 +321,6 @@ class AtomicMergeTests(TransactionTestCase):
 
 @skipUnlessDBFeature("uses_savepoints")
 class AtomicErrorsTests(TransactionTestCase):
-
     available_apps = ["transactions"]
     forbidden_atomic_msg = "This is forbidden when an 'atomic' block is active."
 
@@ -339,8 +356,11 @@ class AtomicErrorsTests(TransactionTestCase):
                 "An error occurred in the current transaction. You can't "
                 "execute queries until the end of the 'atomic' block."
             )
-            with self.assertRaisesMessage(transaction.TransactionManagementError, msg):
+            with self.assertRaisesMessage(
+                transaction.TransactionManagementError, msg
+            ) as cm:
                 r2.save(force_update=True)
+        self.assertIsInstance(cm.exception.__cause__, IntegrityError)
         self.assertEqual(Reporter.objects.get(pk=r1.pk).last_name, "Haddock")
 
     @skipIfDBFeature("atomic_transactions")
@@ -373,12 +393,13 @@ class AtomicErrorsTests(TransactionTestCase):
 @skipUnlessDBFeature("uses_savepoints")
 @skipUnless(connection.vendor == "mysql", "MySQL-specific behaviors")
 class AtomicMySQLTests(TransactionTestCase):
-
     available_apps = ["transactions"]
 
     @skipIf(threading is None, "Test requires threading")
     def test_implicit_savepoint_rollback(self):
-        """MySQL implicitly rolls back savepoints when it deadlocks (#22291)."""
+        """
+        MySQL implicitly rolls back savepoints when it deadlocks (#22291).
+        """
         Reporter.objects.create(id=1)
         Reporter.objects.create(id=2)
 
@@ -414,7 +435,6 @@ class AtomicMySQLTests(TransactionTestCase):
 
 
 class AtomicMiscTests(TransactionTestCase):
-
     available_apps = ["transactions"]
 
     def test_wrap_callable_instance(self):
@@ -434,31 +454,27 @@ class AtomicMiscTests(TransactionTestCase):
         # Expect an error when rolling back a savepoint that doesn't exist.
         # Done outside of the transaction block to ensure proper recovery.
         with self.assertRaises(Error):
-
             # Start a plain transaction.
             with transaction.atomic():
-
                 # Swallow the intentional error raised in the sub-transaction.
                 with self.assertRaisesMessage(Exception, "Oops"):
-
                     # Start a sub-transaction with a savepoint.
                     with transaction.atomic():
                         sid = connection.savepoint_ids[-1]
                         raise Exception("Oops")
 
-                # This is expected to fail because the savepoint no longer exists.
+                # This is expected to fail because the savepoint no longer
+                # exists.
                 connection.savepoint_rollback(sid)
 
+    @skipUnlessDBFeature("supports_transactions")
     def test_mark_for_rollback_on_error_in_transaction(self):
         with transaction.atomic(savepoint=False):
-
             # Swallow the intentional error raised.
             with self.assertRaisesMessage(Exception, "Oops"):
-
                 # Wrap in `mark_for_rollback_on_error` to check if the
                 # transaction is marked broken.
                 with transaction.mark_for_rollback_on_error():
-
                     # Ensure that we are still in a good state.
                     self.assertFalse(transaction.get_rollback())
 
@@ -481,35 +497,32 @@ class AtomicMiscTests(TransactionTestCase):
 
         # Swallow the intentional error raised.
         with self.assertRaisesMessage(Exception, "Oops"):
-
             # Wrap in `mark_for_rollback_on_error` to check if the transaction
             # is marked broken.
             with transaction.mark_for_rollback_on_error():
-
                 # Ensure that we are still in a good state.
                 self.assertFalse(transaction.get_connection().needs_rollback)
 
                 raise Exception("Oops")
 
-            # Ensure that `mark_for_rollback_on_error` did not mark the transaction
-            # as broken, since we are in autocommit mode …
+            # Ensure that `mark_for_rollback_on_error` did not mark the
+            # transaction as broken, since we are in autocommit mode …
             self.assertFalse(transaction.get_connection().needs_rollback)
 
         # … and further queries work nicely.
         Reporter.objects.create()
 
 
+@skipUnlessDBFeature("supports_transactions")
 class NonAutocommitTests(TransactionTestCase):
-
     available_apps = []
 
     def setUp(self):
         transaction.set_autocommit(False)
+        self.addCleanup(transaction.set_autocommit, True)
+        self.addCleanup(transaction.rollback)
 
-    def tearDown(self):
-        transaction.rollback()
-        transaction.set_autocommit(True)
-
+    @skipUnlessDBFeature("supports_foreign_keys")
     def test_orm_query_after_error_and_rollback(self):
         """
         ORM queries are allowed after an error and a rollback in non-autocommit
@@ -523,7 +536,9 @@ class NonAutocommitTests(TransactionTestCase):
         Reporter.objects.last()
 
     def test_orm_query_without_autocommit(self):
-        """#24921 -- ORM queries must be possible after set_autocommit(False)."""
+        """
+        #24921 -- ORM queries must be possible after set_autocommit(False).
+        """
         Reporter.objects.create(first_name="Tintin")
 
 

@@ -1,7 +1,12 @@
 import compileall
 import os
+import subprocess
+import sys
+import tempfile
 from importlib import import_module
+from pathlib import Path
 
+from django.conf import settings
 from django.db import connection, connections
 from django.db.migrations.exceptions import (
     AmbiguityError,
@@ -47,6 +52,16 @@ class RecorderTests(TestCase):
             {(x, y) for (x, y) in recorder.applied_migrations() if x == "myapp"},
             set(),
         )
+
+    def test_has_table_cached(self):
+        """
+        The has_table() method caches a positive result and not continually
+        query for the existence of the migrations table.
+        """
+        recorder = MigrationRecorder(connection)
+        self.assertIs(recorder.has_table(), True)
+        with self.assertNumQueries(0):
+            self.assertIs(recorder.has_table(), True)
 
 
 class LoaderTests(TestCase):
@@ -390,7 +405,7 @@ class LoaderTests(TestCase):
         loader.build_graph()
 
         plan = set(loader.graph.forwards_plan(("app1", "4_auto")))
-        plan = plan - loader.applied_migrations.keys()
+        plan -= loader.applied_migrations.keys()
         expected_plan = {
             ("app2", "1_squashed_2"),
             ("app1", "3_auto"),
@@ -505,7 +520,9 @@ class LoaderTests(TestCase):
         }
     )
     def test_loading_squashed_ref_squashed(self):
-        "Tests loading a squashed migration with a new migration referencing it"
+        """
+        Tests loading a squashed migration with a new migration referencing it
+        """
         r"""
         The sample migrations are structured like this:
 
@@ -529,7 +546,7 @@ class LoaderTests(TestCase):
         # Load with nothing applied: both migrations squashed.
         loader.build_graph()
         plan = set(loader.graph.forwards_plan(("app1", "4_auto")))
-        plan = plan - loader.applied_migrations.keys()
+        plan -= loader.applied_migrations.keys()
         expected_plan = {
             ("app1", "1_auto"),
             ("app2", "1_squashed_2"),
@@ -548,7 +565,7 @@ class LoaderTests(TestCase):
         loader.replace_migrations = False
         loader.build_graph()
         plan = set(loader.graph.forwards_plan(("app1", "3_auto")))
-        plan = plan - loader.applied_migrations.keys()
+        plan -= loader.applied_migrations.keys()
         expected_plan = {
             ("app1", "1_auto"),
             ("app2", "1_auto"),
@@ -564,7 +581,7 @@ class LoaderTests(TestCase):
         self.record_applied(recorder, "app1", "2_auto")
         loader.build_graph()
         plan = set(loader.graph.forwards_plan(("app1", "4_auto")))
-        plan = plan - loader.applied_migrations.keys()
+        plan -= loader.applied_migrations.keys()
         expected_plan = {
             ("app2", "1_squashed_2"),
             ("app1", "3_auto"),
@@ -576,7 +593,7 @@ class LoaderTests(TestCase):
         self.record_applied(recorder, "app2", "1_auto")
         loader.build_graph()
         plan = set(loader.graph.forwards_plan(("app1", "4_auto")))
-        plan = plan - loader.applied_migrations.keys()
+        plan -= loader.applied_migrations.keys()
         expected_plan = {
             ("app2", "2_auto"),
             ("app1", "3_auto"),
@@ -636,6 +653,73 @@ class LoaderTests(TestCase):
             test_module.__file__ = module_file
             test_module.__spec__.origin = module_origin
             test_module.__spec__.has_location = module_has_location
+
+    def test_loading_order_does_not_create_circular_dependency(self):
+        """
+        Before, for these migrations:
+        app1
+        [ ] 0001_squashed_initial <- replaces app1.0001
+        [ ] 0002_squashed_initial <- replaces app1.0001
+            depends on app1.0001_squashed_initial & app2.0001_squashed_initial
+        app2
+        [ ] 0001_squashed_initial <- replaces app2.0001
+
+        When loading app1's migrations, if 0002_squashed_initial was first:
+        {'0002_squashed_initial', '0001_initial', '0001_squashed_initial'}
+        Then CircularDependencyError was raised, but it's resolvable as:
+        {'0001_initial', '0001_squashed_initial', '0002_squashed_initial'}
+        """
+        # Create a test settings file to provide to the subprocess.
+        MIGRATION_MODULES = {
+            "app1": "migrations.test_migrations_squashed_replaced_order.app1",
+            "app2": "migrations.test_migrations_squashed_replaced_order.app2",
+        }
+        INSTALLED_APPS = [
+            "migrations.test_migrations_squashed_replaced_order.app1",
+            "migrations.test_migrations_squashed_replaced_order.app2",
+        ]
+        tests_dir = Path(__file__).parent.parent
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".py", dir=tests_dir, delete=False
+        ) as test_settings:
+            self.addCleanup(os.remove, test_settings.name)
+            for attr, value in settings._wrapped.__dict__.items():
+                # Only write builtin values so that any settings that reference
+                # a value that needs an import are omitted.
+                if attr.isupper() and type(value).__module__ == "builtins":
+                    test_settings.write(f"{attr} = {value!r}\n")
+            # Provide overrides here, instead of via decorators.
+            test_settings.write(f"DATABASES = {settings.DATABASES}\n")
+            test_settings.write(f"MIGRATION_MODULES = {MIGRATION_MODULES}\n")
+            # Isolate away other test apps.
+            test_settings.write(
+                "INSTALLED_APPS=[a for a in INSTALLED_APPS if a.startswith('django')]\n"
+            )
+            test_settings.write(f"INSTALLED_APPS += {INSTALLED_APPS}\n")
+
+        test_environ = os.environ.copy()
+        test_python_path = sys.path.copy()
+        test_python_path.append(str(tests_dir))
+        test_environ["PYTHONPATH"] = os.pathsep.join(test_python_path)
+        # Ensure deterministic failures.
+        test_environ["PYTHONHASHSEED"] = "1"
+
+        args = [
+            sys.executable,
+            "-m",
+            "django",
+            "showmigrations",
+            "app1",
+            "--skip-checks",
+            "--settings",
+            Path(test_settings.name).stem,
+        ]
+        try:
+            subprocess.run(
+                args, capture_output=True, env=test_environ, check=True, text=True
+            )
+        except subprocess.CalledProcessError as err:
+            self.fail(err.stderr)
 
 
 class PycLoaderTests(MigrationTestBase):

@@ -4,6 +4,7 @@ import pickle
 import random
 import re
 
+import django
 from django.core.cache.backends.base import DEFAULT_TIMEOUT, BaseCache
 from django.utils.functional import cached_property
 from django.utils.module_loading import import_string
@@ -14,8 +15,9 @@ class RedisSerializer:
         self.protocol = pickle.HIGHEST_PROTOCOL if protocol is None else protocol
 
     def dumps(self, obj):
-        # Only skip pickling for integers, a int subclasses as bool should be
-        # pickled.
+        # For better incr() and decr() atomicity, don't pickle integers.
+        # Using type() rather than isinstance() matches only integers and not
+        # subclasses like bool.
         if type(obj) is int:
             return obj
         return pickle.dumps(obj, self.protocol)
@@ -32,9 +34,9 @@ class RedisCacheClient:
         self,
         servers,
         serializer=None,
-        db=None,
         pool_class=None,
         parser_class=None,
+        **options,
     ):
         import redis
 
@@ -58,7 +60,19 @@ class RedisCacheClient:
             parser_class = import_string(parser_class)
         parser_class = parser_class or self._lib.connection.DefaultParser
 
-        self._pool_options = {"parser_class": parser_class, "db": db}
+        version = django.get_version()
+        if hasattr(self._lib, "DriverInfo"):
+            driver_info = self._lib.DriverInfo().add_upstream_driver("django", version)
+            driver_info_options = {"driver_info": driver_info}
+        else:
+            # DriverInfo is not available in this redis-py version.
+            driver_info_options = {"lib_name": f"redis-py(django_v{version})"}
+
+        self._pool_options = {
+            "parser_class": parser_class,
+            **driver_info_options,
+            **options,
+        }
 
     def _get_connection_pool_index(self, write):
         # Write to the first server. Read from other servers if there are more,
@@ -130,7 +144,7 @@ class RedisCacheClient:
         return bool(client.exists(key))
 
     def incr(self, key, delta):
-        client = self.get_client(key)
+        client = self.get_client(key, write=True)
         if not client.exists(key):
             raise ValueError("Key '%s' not found." % key)
         return client.incr(key, delta)
@@ -214,6 +228,8 @@ class RedisCache(BaseCache):
         return self._cache.incr(key, delta)
 
     def set_many(self, data, timeout=DEFAULT_TIMEOUT, version=None):
+        if not data:
+            return []
         safe_data = {}
         for key, value in data.items():
             key = self.make_and_validate_key(key, version=version)
@@ -222,10 +238,9 @@ class RedisCache(BaseCache):
         return []
 
     def delete_many(self, keys, version=None):
-        safe_keys = []
-        for key in keys:
-            key = self.make_and_validate_key(key, version=version)
-            safe_keys.append(key)
+        if not keys:
+            return
+        safe_keys = [self.make_and_validate_key(key, version=version) for key in keys]
         self._cache.delete_many(safe_keys)
 
     def clear(self):

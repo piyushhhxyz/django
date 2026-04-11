@@ -1,5 +1,7 @@
 from collections import namedtuple
 
+from django.db.models import DB_CASCADE, DB_SET_DEFAULT, DB_SET_NULL, DO_NOTHING
+
 # Structure returned by DatabaseIntrospection.get_table_list()
 TableInfo = namedtuple("TableInfo", ["name", "type"])
 
@@ -15,9 +17,19 @@ class BaseDatabaseIntrospection:
     """Encapsulate backend-specific introspection utilities."""
 
     data_types_reverse = {}
+    on_delete_types = {
+        "CASCADE": DB_CASCADE,
+        "NO ACTION": DO_NOTHING,
+        "SET DEFAULT": DB_SET_DEFAULT,
+        "SET NULL": DB_SET_NULL,
+        # DB_RESTRICT - "RESTRICT" is not supported.
+    }
 
     def __init__(self, connection):
         self.connection = connection
+
+    def __del__(self):
+        del self.connection
 
     def get_field_type(self, data_type, description):
         """
@@ -155,8 +167,9 @@ class BaseDatabaseIntrospection:
     def get_sequences(self, cursor, table_name, table_fields=()):
         """
         Return a list of introspected sequences for table_name. Each sequence
-        is a dict: {'table': <table_name>, 'column': <column_name>}. An optional
-        'name' key can be added if the backend supports named sequences.
+        is a dict: {'table': <table_name>, 'column': <column_name>}. An
+        optional 'name' key can be added if the backend supports named
+        sequences.
         """
         raise NotImplementedError(
             "subclasses of BaseDatabaseIntrospection may require a get_sequences() "
@@ -165,7 +178,10 @@ class BaseDatabaseIntrospection:
 
     def get_relations(self, cursor, table_name):
         """
-        Return a dictionary of {field_name: (field_name_other_table, other_table)}
+        Return a dictionary of
+            {
+                field_name: (field_name_other_table, other_table, db_on_delete)
+            }
         representing all foreign keys in the given table.
         """
         raise NotImplementedError(
@@ -177,9 +193,14 @@ class BaseDatabaseIntrospection:
         """
         Return the name of the primary key column for the given table.
         """
+        columns = self.get_primary_key_columns(cursor, table_name)
+        return columns[0] if columns else None
+
+    def get_primary_key_columns(self, cursor, table_name):
+        """Return a list of primary key columns for the given table."""
         for constraint in self.get_constraints(cursor, table_name).values():
             if constraint["primary_key"]:
-                return constraint["columns"][0]
+                return constraint["columns"]
         return None
 
     def get_constraints(self, cursor, table_name):

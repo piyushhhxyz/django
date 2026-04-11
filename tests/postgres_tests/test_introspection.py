@@ -1,12 +1,10 @@
 from io import StringIO
 
 from django.core.management import call_command
-from django.test.utils import modify_settings
 
 from . import PostgreSQLTestCase
 
 
-@modify_settings(INSTALLED_APPS={"append": "django.contrib.postgres"})
 class InspectDBTests(PostgreSQLTestCase):
     def assertFieldsInModel(self, model, field_outputs):
         out = StringIO()
@@ -32,6 +30,19 @@ class InspectDBTests(PostgreSQLTestCase):
                 "timestamps = django.contrib.postgres.fields.DateTimeRangeField("
                 "blank=True, null=True)",
                 "dates = django.contrib.postgres.fields.DateRangeField(blank=True, "
+                "null=True)",
+            ],
+        )
+
+    def test_hstore_field(self):
+        from django.db.backends.postgresql.base import psycopg_version
+
+        if psycopg_version() < (3, 2):
+            self.skipTest("psycopg 3.2+ is required.")
+        self.assertFieldsInModel(
+            "postgres_tests_hstoremodel",
+            [
+                "field = django.contrib.postgres.fields.HStoreField(blank=True, "
                 "null=True)",
             ],
         )

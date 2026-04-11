@@ -1,4 +1,3 @@
-import pickle
 from datetime import datetime
 from functools import partialmethod
 from io import StringIO
@@ -6,12 +5,12 @@ from unittest import mock, skipIf
 
 from django.core import serializers
 from django.core.serializers import SerializerDoesNotExist
-from django.core.serializers.base import PickleSerializer, ProgressBar
+from django.core.serializers.base import ProgressBar
 from django.db import connection, transaction
+from django.db.models import Prefetch
 from django.http import HttpResponse
 from django.test import SimpleTestCase, override_settings, skipUnlessDBFeature
-from django.test.utils import Approximate, ignore_warnings
-from django.utils.deprecation import RemovedInDjango50Warning
+from django.test.utils import Approximate
 
 from .models import (
     Actor,
@@ -20,6 +19,7 @@ from .models import (
     AuthorProfile,
     BaseModel,
     Category,
+    CategoryMetaData,
     Child,
     ComplexModel,
     Movie,
@@ -75,7 +75,7 @@ class SerializerRegistrationTests(SimpleTestCase):
         all_formats = set(serializers.get_serializer_formats())
         public_formats = set(serializers.get_public_serializer_formats())
 
-        self.assertIn("xml", all_formats),
+        self.assertIn("xml", all_formats)
         self.assertIn("xml", public_formats)
 
         self.assertIn("json2", all_formats)
@@ -157,7 +157,7 @@ class SerializersTestBase:
             if isinstance(stream, StringIO):
                 self.assertEqual(string_data, stream.getvalue())
             else:
-                self.assertEqual(string_data, stream.content.decode())
+                self.assertEqual(string_data, stream.text)
 
     def test_serialize_specific_fields(self):
         obj = ComplexModel(field1="first", field2="second", field3="third")
@@ -277,17 +277,44 @@ class SerializersTestBase:
             serializers.serialize(self.serializer_name, [mv])
 
     def test_serialize_prefetch_related_m2m(self):
-        # One query for the Article table and one for each prefetched m2m
-        # field.
-        with self.assertNumQueries(3):
+        # One query for the Article table, one for each prefetched m2m
+        # field, and one extra one for the nested prefetch for the Topics
+        # that have a relationship to the Category.
+        with self.assertNumQueries(5):
             serializers.serialize(
                 self.serializer_name,
-                Article.objects.prefetch_related("categories", "meta_data"),
+                Article.objects.prefetch_related(
+                    "meta_data",
+                    "topics",
+                    Prefetch(
+                        "categories",
+                        queryset=Category.objects.prefetch_related("topic_set"),
+                    ),
+                ),
             )
-        # One query for the Article table, and two m2m queries for each
+        # One query for the Article table, and three m2m queries for each
         # article.
-        with self.assertNumQueries(5):
+        with self.assertNumQueries(7):
             serializers.serialize(self.serializer_name, Article.objects.all())
+
+    def test_serialize_prefetch_related_m2m_with_natural_keys(self):
+        # One query for the Article table, one for each prefetched m2m
+        # field, and a query to get the categories for each Article (two in
+        # total).
+        with self.assertNumQueries(5):
+            serializers.serialize(
+                self.serializer_name,
+                Article.objects.prefetch_related(
+                    Prefetch(
+                        "meta_data",
+                        queryset=CategoryMetaData.objects.prefetch_related(
+                            "category_set"
+                        ),
+                    ),
+                    "topics",
+                ),
+                use_natural_foreign_keys=True,
+            )
 
     def test_serialize_with_null_pk(self):
         """
@@ -364,7 +391,9 @@ class SerializersTestBase:
         self.assertEqual(Category.objects.count(), 5)
 
     def test_deterministic_mapping_ordering(self):
-        """Mapping such as fields should be deterministically ordered. (#24558)"""
+        """
+        Mapping such as fields should be deterministically ordered. (#24558)
+        """
         output = serializers.serialize(self.serializer_name, [self.a1], indent=2)
         categories = self.a1.categories.values_list("pk", flat=True)
         self.assertEqual(
@@ -379,7 +408,9 @@ class SerializersTestBase:
         )
 
     def test_deserialize_force_insert(self):
-        """Deserialized content can be saved with force_insert as a parameter."""
+        """
+        Deserialized content can be saved with force_insert as a parameter.
+        """
         serial_str = serializers.serialize(self.serializer_name, [self.a1])
         deserial_obj = list(serializers.deserialize(self.serializer_name, serial_str))[
             0
@@ -410,6 +441,37 @@ class SerializersTestBase:
         self.assertEqual(self._get_field_values(child_data, "parent_m2m"), [])
         self.assertEqual(self._get_field_values(child_data, "parent_data"), [])
 
+    def test_serialize_only_pk(self):
+        with self.assertNumQueries(7) as ctx:
+            serializers.serialize(
+                self.serializer_name,
+                Article.objects.all(),
+                use_natural_foreign_keys=False,
+            )
+
+        categories_sql = ctx[1]["sql"]
+        self.assertNotIn(connection.ops.quote_name("meta_data_id"), categories_sql)
+        meta_data_sql = ctx[2]["sql"]
+        self.assertNotIn(connection.ops.quote_name("kind"), meta_data_sql)
+        topics_data_sql = ctx[3]["sql"]
+        self.assertNotIn(connection.ops.quote_name("category_id"), topics_data_sql)
+
+    def test_serialize_no_only_pk_with_natural_keys(self):
+        with self.assertNumQueries(7) as ctx:
+            serializers.serialize(
+                self.serializer_name,
+                Article.objects.all(),
+                use_natural_foreign_keys=True,
+            )
+
+        categories_sql = ctx[1]["sql"]
+        self.assertNotIn(connection.ops.quote_name("meta_data_id"), categories_sql)
+        # CategoryMetaData has natural_key().
+        meta_data_sql = ctx[2]["sql"]
+        self.assertIn(connection.ops.quote_name("kind"), meta_data_sql)
+        topics_data_sql = ctx[3]["sql"]
+        self.assertNotIn(connection.ops.quote_name("category_id"), topics_data_sql)
+
 
 class SerializerAPITests(SimpleTestCase):
     def test_stream_class(self):
@@ -431,12 +493,12 @@ class SerializerAPITests(SimpleTestCase):
         self.assertIs(serializer.stream_class, File)
         self.assertIsInstance(serializer.stream, File)
         self.assertEqual(
-            data, '[{"model": "serializers.score", "pk": 1, "fields": {"score": 3.4}}]'
+            data,
+            '[{"model": "serializers.score", "pk": 1, "fields": {"score": 3.4}}]\n',
         )
 
 
 class SerializersTransactionTestBase:
-
     available_apps = ["serializers"]
 
     @skipUnlessDBFeature("supports_forward_references")
@@ -458,31 +520,6 @@ class SerializersTransactionTestBase:
         art_obj = Article.objects.all()[0]
         self.assertEqual(art_obj.categories.count(), 1)
         self.assertEqual(art_obj.author.name, "Agnes")
-
-
-class PickleSerializerTests(SimpleTestCase):
-    @ignore_warnings(category=RemovedInDjango50Warning)
-    def test_serializer_protocol(self):
-        serializer = PickleSerializer(protocol=3)
-        self.assertEqual(serializer.protocol, 3)
-        # If protocol is not provided, it defaults to pickle.HIGHEST_PROTOCOL
-        serializer = PickleSerializer()
-        self.assertEqual(serializer.protocol, pickle.HIGHEST_PROTOCOL)
-
-    @ignore_warnings(category=RemovedInDjango50Warning)
-    def test_serializer_loads_dumps(self):
-        serializer = PickleSerializer()
-        test_data = "test data"
-        dump = serializer.dumps(test_data)
-        self.assertEqual(serializer.loads(dump), test_data)
-
-    def test_serializer_warning(self):
-        msg = (
-            "PickleSerializer is deprecated due to its security risk. Use "
-            "JSONSerializer instead."
-        )
-        with self.assertRaisesMessage(RemovedInDjango50Warning, msg):
-            PickleSerializer()
 
 
 def register_tests(test_class, method_name, test_func, exclude=()):

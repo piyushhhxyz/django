@@ -1,8 +1,4 @@
-from unittest import mock
-
 from django.test import SimpleTestCase
-from django.test.utils import ignore_warnings
-from django.utils.deprecation import RemovedInDjango50Warning
 from django.utils.functional import cached_property, classproperty, lazy
 
 
@@ -108,30 +104,6 @@ class FunctionalTests(SimpleTestCase):
         for attr in attrs:
             self.assertCachedPropertyWorks(attr, Class)
 
-    @ignore_warnings(category=RemovedInDjango50Warning)
-    def test_cached_property_name(self):
-        class Class:
-            def other_value(self):
-                """Here is the docstring..."""
-                return 1, object()
-
-            other = cached_property(other_value, name="other")
-            other2 = cached_property(other_value, name="different_name")
-
-        self.assertCachedPropertyWorks("other", Class)
-        # An explicit name is ignored.
-        obj = Class()
-        obj.other2
-        self.assertFalse(hasattr(obj, "different_name"))
-
-    def test_cached_property_name_deprecation_warning(self):
-        def value(self):
-            return 1
-
-        msg = "The name argument is deprecated as it's unnecessary as of Python 3.6."
-        with self.assertWarnsMessage(RemovedInDjango50Warning, msg):
-            cached_property(value, name="other_name")
-
     def test_cached_property_auto_name(self):
         """
         cached_property caches its value and behaves like a property
@@ -155,8 +127,17 @@ class FunctionalTests(SimpleTestCase):
             self.assertCachedPropertyWorks(attr, Class)
 
     def test_cached_property_reuse_different_names(self):
-        """Disallow this case because the decorated function wouldn't be cached."""
-        with self.assertRaises(RuntimeError) as ctx:
+        """
+        Disallow this case because the decorated function wouldn't be cached.
+        """
+        type_msg = (
+            "Cannot assign the same cached_property to two different names ('a' and "
+            "'b')."
+        )
+        error_type = TypeError
+        msg = type_msg
+
+        with self.assertRaisesMessage(error_type, msg):
 
             class ReusedCachedProperty:
                 @cached_property
@@ -164,16 +145,6 @@ class FunctionalTests(SimpleTestCase):
                     pass
 
                 b = a
-
-        self.assertEqual(
-            str(ctx.exception.__context__),
-            str(
-                TypeError(
-                    "Cannot assign the same cached_property to two different "
-                    "names ('a' and 'b')."
-                )
-            ),
-        )
 
     def test_cached_property_reuse_same_name(self):
         """
@@ -213,10 +184,72 @@ class FunctionalTests(SimpleTestCase):
         with self.assertRaisesMessage(TypeError, msg):
             Foo().cp
 
-    def test_lazy_add(self):
+    def test_lazy_add_int(self):
         lazy_4 = lazy(lambda: 4, int)
         lazy_5 = lazy(lambda: 5, int)
+        self.assertEqual(4 + lazy_5(), 9)
+        self.assertEqual(lazy_4() + 5, 9)
         self.assertEqual(lazy_4() + lazy_5(), 9)
+
+    def test_lazy_add_list(self):
+        lazy_4 = lazy(lambda: [4], list)
+        lazy_5 = lazy(lambda: [5], list)
+        self.assertEqual([4] + lazy_5(), [4, 5])
+        self.assertEqual(lazy_4() + [5], [4, 5])
+        self.assertEqual(lazy_4() + lazy_5(), [4, 5])
+
+    def test_lazy_add_str(self):
+        lazy_a = lazy(lambda: "a", str)
+        lazy_b = lazy(lambda: "b", str)
+        self.assertEqual("a" + lazy_b(), "ab")
+        self.assertEqual(lazy_a() + "b", "ab")
+        self.assertEqual(lazy_a() + lazy_b(), "ab")
+
+    def test_lazy_mod_int(self):
+        lazy_4 = lazy(lambda: 4, int)
+        lazy_5 = lazy(lambda: 5, int)
+        self.assertEqual(4 % lazy_5(), 4)
+        self.assertEqual(lazy_4() % 5, 4)
+        self.assertEqual(lazy_4() % lazy_5(), 4)
+
+    def test_lazy_mod_str(self):
+        lazy_a = lazy(lambda: "a%s", str)
+        lazy_b = lazy(lambda: "b", str)
+        self.assertEqual("a%s" % lazy_b(), "ab")
+        self.assertEqual(lazy_a() % "b", "ab")
+        self.assertEqual(lazy_a() % lazy_b(), "ab")
+
+    def test_lazy_mul_int(self):
+        lazy_4 = lazy(lambda: 4, int)
+        lazy_5 = lazy(lambda: 5, int)
+        self.assertEqual(4 * lazy_5(), 20)
+        self.assertEqual(lazy_4() * 5, 20)
+        self.assertEqual(lazy_4() * lazy_5(), 20)
+
+    def test_lazy_mul_list(self):
+        lazy_4 = lazy(lambda: [4], list)
+        lazy_5 = lazy(lambda: 5, int)
+        self.assertEqual([4] * lazy_5(), [4, 4, 4, 4, 4])
+        self.assertEqual(lazy_4() * 5, [4, 4, 4, 4, 4])
+        self.assertEqual(lazy_4() * lazy_5(), [4, 4, 4, 4, 4])
+
+    def test_lazy_mul_str(self):
+        lazy_a = lazy(lambda: "a", str)
+        lazy_5 = lazy(lambda: 5, int)
+        self.assertEqual("a" * lazy_5(), "aaaaa")
+        self.assertEqual(lazy_a() * 5, "aaaaa")
+        self.assertEqual(lazy_a() * lazy_5(), "aaaaa")
+
+    def test_lazy_format(self):
+        class QuotedString(str):
+            def __format__(self, format_spec):
+                value = super().__format__(format_spec)
+                return f"“{value}”"
+
+        lazy_f = lazy(lambda: QuotedString("Hello!"), QuotedString)
+        self.assertEqual(format(lazy_f(), ""), "“Hello!”")
+        f = lazy_f()
+        self.assertEqual(f"I said, {f}", "I said, “Hello!”")
 
     def test_lazy_equality(self):
         """
@@ -244,20 +277,22 @@ class FunctionalTests(SimpleTestCase):
         lazy_obj = lazy(lambda: original_object, bytes)
         self.assertEqual(repr(original_object), repr(lazy_obj()))
 
-    def test_lazy_class_preparation_caching(self):
-        # lazy() should prepare the proxy class only once i.e. the first time
-        # it's used.
-        lazified = lazy(lambda: 0, int)
-        __proxy__ = lazified().__class__
-        with mock.patch.object(__proxy__, "__prepare_class__") as mocked:
-            lazified()
-            mocked.assert_not_called()
+    def test_lazy_regular_method(self):
+        original_object = 15
+        lazy_obj = lazy(lambda: original_object, int)
+        self.assertEqual(original_object.bit_length(), lazy_obj().bit_length())
 
     def test_lazy_bytes_and_str_result_classes(self):
         lazy_obj = lazy(lambda: "test", str, bytes)
-        msg = "Cannot call lazy() with both bytes and text return types."
-        with self.assertRaisesMessage(ValueError, msg):
-            lazy_obj()
+        self.assertEqual(str(lazy_obj()), "test")
+
+    def test_lazy_str_cast_mixed_result_types(self):
+        lazy_value = lazy(lambda: [1], str, list)()
+        self.assertEqual(str(lazy_value), "[1]")
+
+    def test_lazy_str_cast_mixed_bytes_result_types(self):
+        lazy_value = lazy(lambda: [1], bytes, list)()
+        self.assertEqual(str(lazy_value), "[1]")
 
     def test_classproperty_getter(self):
         class Foo:

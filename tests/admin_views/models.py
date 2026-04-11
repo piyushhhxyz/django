@@ -9,6 +9,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.core.files.storage import FileSystemStorage
 from django.db import models
+from django.utils import timezone
 
 
 class Section(models.Model):
@@ -66,6 +67,11 @@ class Article(models.Model):
     def model_month(self):
         return self.date.month
 
+    @property
+    @admin.display(description="Is from past?", boolean=True)
+    def model_property_is_from_past(self):
+        return self.date < timezone.now()
+
 
 class Book(models.Model):
     """
@@ -76,6 +82,9 @@ class Book(models.Model):
 
     def __str__(self):
         return self.name
+
+    def get_absolute_url(self):
+        return f"/books/{self.id}/"
 
 
 class Promo(models.Model):
@@ -257,7 +266,13 @@ class Person(models.Model):
         (2, "Female"),
     )
     name = models.CharField(max_length=100)
-    gender = models.IntegerField(choices=GENDER_CHOICES)
+    gender = models.IntegerField(
+        choices=GENDER_CHOICES,
+        verbose_name=(
+            "very very very very very very very very very "
+            "loooooooooooooooooooooooooooooooooooooooooong name"
+        ),
+    )
     age = models.IntegerField(default=21)
     alive = models.BooleanField(default=True)
 
@@ -392,8 +407,8 @@ class Picture(models.Model):
 
 
 class Language(models.Model):
-    iso = models.CharField(max_length=5, primary_key=True)
-    name = models.CharField(max_length=50)
+    iso = models.CharField(max_length=5, primary_key=True, help_text="iso helptext")
+    name = models.CharField(max_length=50, help_text="name helptext")
     english_name = models.CharField(max_length=50)
     shortlist = models.BooleanField(default=False)
 
@@ -537,6 +552,7 @@ class SuperVillain(Villain):
 
 class FunkyTag(models.Model):
     "Because we all know there's only one real use case for GFKs."
+
     name = models.CharField(max_length=25)
     content_type = models.ForeignKey(ContentType, models.CASCADE)
     object_id = models.PositiveIntegerField()
@@ -611,6 +627,22 @@ class CyclicTwo(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class Course(models.Model):
+    DIFFICULTY_CHOICES = [
+        ("beginner", "Beginner Class"),
+        ("intermediate", "Intermediate Class"),
+        ("advanced", "Advanced Class"),
+    ]
+
+    title = models.CharField(max_length=100)
+    materials = models.FileField(upload_to="test_upload")
+    difficulty = models.CharField(
+        max_length=20, choices=DIFFICULTY_CHOICES, null=True, blank=True
+    )
+    categories = models.ManyToManyField(Category, blank=True)
+    start_datetime = models.DateTimeField(null=True, blank=True)
 
 
 class Topping(models.Model):
@@ -929,7 +961,7 @@ class _Manager(models.Manager):
 
 class FilteredManager(models.Model):
     def __str__(self):
-        return "PK=%d" % self.pk
+        return "PK=%s" % self.pk
 
     pk_gt_1 = _Manager()
     objects = models.Manager()
@@ -962,6 +994,12 @@ class City(models.Model):
 class Restaurant(models.Model):
     city = models.ForeignKey(City, models.CASCADE)
     name = models.CharField(max_length=100)
+
+    class Meta:
+        verbose_name = (
+            "very very very very very very very very very "
+            "loooooooooooooooooooooooooooooooooooooooooong name"
+        )
 
     def get_absolute_url(self):
         return "/dummy/%s/" % self.pk
@@ -1133,4 +1171,32 @@ class Traveler(models.Model):
         models.CASCADE,
         related_name="favorite_country_to_vacation_set",
         limit_choices_to={"continent": Country.ASIA},
+    )
+
+
+class Square(models.Model):
+    side = models.IntegerField()
+    area = models.GeneratedField(
+        db_persist=True,
+        expression=models.F("side") * models.F("side"),
+        output_field=models.BigIntegerField(),
+    )
+
+    class Meta:
+        required_db_features = {"supports_stored_generated_columns"}
+
+
+class CamelCaseModel(models.Model):
+    interesting_name = models.CharField(max_length=100)
+
+    def __str__(self):
+        return self.interesting_name
+
+
+class CamelCaseRelatedModel(models.Model):
+    m2m = models.ManyToManyField(CamelCaseModel, related_name="m2m")
+    fk = models.ForeignKey(CamelCaseModel, on_delete=models.CASCADE, related_name="fk")
+    # Add another relation that will not participate in filter_horizontal.
+    fk2 = models.ForeignKey(
+        CamelCaseModel, on_delete=models.CASCADE, related_name="fk2"
     )

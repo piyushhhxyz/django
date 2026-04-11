@@ -1,5 +1,5 @@
 from django.db import DatabaseError, connection
-from django.db.models import Index
+from django.db.models import DB_CASCADE, DB_SET_DEFAULT, DB_SET_NULL, DO_NOTHING, Index
 from django.test import TransactionTestCase, skipUnlessDBFeature
 
 from .models import (
@@ -9,6 +9,10 @@ from .models import (
     City,
     Comment,
     Country,
+    DbCommentModel,
+    DbOnDeleteCascadeModel,
+    DbOnDeleteSetDefaultModel,
+    DbOnDeleteSetNullModel,
     District,
     Reporter,
     UniqueConstraintConditionModel,
@@ -16,7 +20,6 @@ from .models import (
 
 
 class IntrospectionTests(TransactionTestCase):
-
     available_apps = ["introspection"]
 
     def test_table_names(self):
@@ -113,7 +116,7 @@ class IntrospectionTests(TransactionTestCase):
             [
                 connection.features.introspected_field_types[field]
                 for field in (
-                    "AutoField",
+                    "BigAutoField",
                     "CharField",
                     "CharField",
                     "CharField",
@@ -132,7 +135,7 @@ class IntrospectionTests(TransactionTestCase):
             )
         self.assertEqual(
             [
-                r[3]
+                r[2]
                 for r in desc
                 if connection.introspection.get_field_type(r[1], r) == "CharField"
             ],
@@ -179,6 +182,26 @@ class IntrospectionTests(TransactionTestCase):
             [connection.introspection.get_field_type(r[1], r) for r in desc],
         )
 
+    @skipUnlessDBFeature("supports_comments")
+    def test_db_comments(self):
+        with connection.cursor() as cursor:
+            desc = connection.introspection.get_table_description(
+                cursor, DbCommentModel._meta.db_table
+            )
+            table_list = connection.introspection.get_table_list(cursor)
+        self.assertEqual(
+            ["'Name' column comment"],
+            [field.comment for field in desc if field.name == "name"],
+        )
+        self.assertEqual(
+            ["Custom table comment"],
+            [
+                table.comment
+                for table in table_list
+                if table.name == "introspection_dbcommentmodel"
+            ],
+        )
+
     # Regression test for #9991 - 'real' types in postgres
     @skipUnlessDBFeature("has_real_datatype")
     def test_postgresql_real_type(self):
@@ -199,10 +222,14 @@ class IntrospectionTests(TransactionTestCase):
                 cursor, Article._meta.db_table
             )
 
-        # That's {field_name: (field_name_other_table, other_table)}
+        if connection.vendor == "mysql" and connection.mysql_is_mariadb:
+            no_db_on_delete = None
+        else:
+            no_db_on_delete = DO_NOTHING
+        # {field_name: (field_name_other_table, other_table, db_on_delete)}
         expected_relations = {
-            "reporter_id": ("id", Reporter._meta.db_table),
-            "response_to_id": ("id", Article._meta.db_table),
+            "reporter_id": ("id", Reporter._meta.db_table, no_db_on_delete),
+            "response_to_id": ("id", Article._meta.db_table, no_db_on_delete),
         }
         self.assertEqual(relations, expected_relations)
 
@@ -216,6 +243,50 @@ class IntrospectionTests(TransactionTestCase):
             )
         with connection.schema_editor() as editor:
             editor.add_field(Article, body)
+        self.assertEqual(relations, expected_relations)
+
+    @skipUnlessDBFeature("can_introspect_foreign_keys", "supports_on_delete_db_cascade")
+    def test_get_relations_db_on_delete_cascade(self):
+        with connection.cursor() as cursor:
+            relations = connection.introspection.get_relations(
+                cursor, DbOnDeleteCascadeModel._meta.db_table
+            )
+
+        if connection.vendor == "mysql" and connection.mysql_is_mariadb:
+            no_db_on_delete = None
+        else:
+            no_db_on_delete = DO_NOTHING
+        # {field_name: (field_name_other_table, other_table, db_on_delete)}
+        expected_relations = {
+            "fk_db_cascade_id": ("id", City._meta.db_table, DB_CASCADE),
+            "fk_do_nothing_id": ("id", Country._meta.db_table, no_db_on_delete),
+        }
+        self.assertEqual(relations, expected_relations)
+
+    @skipUnlessDBFeature("can_introspect_foreign_keys", "supports_on_delete_db_null")
+    def test_get_relations_db_on_delete_null(self):
+        with connection.cursor() as cursor:
+            relations = connection.introspection.get_relations(
+                cursor, DbOnDeleteSetNullModel._meta.db_table
+            )
+
+        # {field_name: (field_name_other_table, other_table, db_on_delete)}
+        expected_relations = {
+            "fk_set_null_id": ("id", Reporter._meta.db_table, DB_SET_NULL),
+        }
+        self.assertEqual(relations, expected_relations)
+
+    @skipUnlessDBFeature("can_introspect_foreign_keys", "supports_on_delete_db_default")
+    def test_get_relations_db_on_delete_default(self):
+        with connection.cursor() as cursor:
+            relations = connection.introspection.get_relations(
+                cursor, DbOnDeleteSetDefaultModel._meta.db_table
+            )
+
+        # {field_name: (field_name_other_table, other_table, db_on_delete)}
+        expected_relations = {
+            "fk_db_set_default_id": ("id", Country._meta.db_table, DB_SET_DEFAULT),
+        }
         self.assertEqual(relations, expected_relations)
 
     def test_get_primary_key_column(self):
@@ -299,10 +370,10 @@ class IntrospectionTests(TransactionTestCase):
             foreign_key=None,
         ):
             # Different backends have different values for same constraints:
-            #               PRIMARY KEY     UNIQUE CONSTRAINT    UNIQUE INDEX
-            # MySQL      pk=1 uniq=1 idx=1  pk=0 uniq=1 idx=1  pk=0 uniq=1 idx=1
-            # PostgreSQL pk=1 uniq=1 idx=0  pk=0 uniq=1 idx=0  pk=0 uniq=1 idx=1
-            # SQLite     pk=1 uniq=0 idx=0  pk=0 uniq=1 idx=0  pk=0 uniq=1 idx=1
+            #              PRIMARY KEY     UNIQUE CONSTRAINT    UNIQUE INDEX
+            # MySQL     pk=1 uniq=1 idx=1  pk=0 uniq=1 idx=1  pk=0 uniq=1 idx=1
+            # Postgres  pk=1 uniq=1 idx=0  pk=0 uniq=1 idx=0  pk=0 uniq=1 idx=1
+            # SQLite    pk=1 uniq=0 idx=0  pk=0 uniq=1 idx=0  pk=0 uniq=1 idx=1
             if details["primary_key"]:
                 details["unique"] = True
             if details["unique"]:

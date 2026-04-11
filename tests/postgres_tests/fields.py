@@ -2,6 +2,7 @@
 Indirection layer for PostgreSQL-specific fields, so the tests don't fail when
 run with a backend other than PostgreSQL.
 """
+
 import enum
 
 from django.db import models
@@ -10,9 +11,6 @@ try:
     from django.contrib.postgres.fields import (
         ArrayField,
         BigIntegerRangeField,
-        CICharField,
-        CIEmailField,
-        CITextField,
         DateRangeField,
         DateTimeRangeField,
         DecimalRangeField,
@@ -47,9 +45,6 @@ except ImportError:
 
     ArrayField = DummyArrayField
     BigIntegerRangeField = models.Field
-    CICharField = models.Field
-    CIEmailField = models.Field
-    CITextField = models.Field
     DateRangeField = models.Field
     DateTimeRangeField = DummyContinuousRangeField
     DecimalRangeField = DummyContinuousRangeField
@@ -62,3 +57,12 @@ except ImportError:
 class EnumField(models.CharField):
     def get_prep_value(self, value):
         return value.value if isinstance(value, enum.Enum) else value
+
+
+class OffByOneField(models.IntegerField):
+    def get_placeholder_sql(self, value, compiler, connection):
+        if hasattr(value, "as_sql"):
+            sql, params = compiler.compile(value)
+        else:
+            sql, params = "%s", (value,)
+        return f"({sql} + %s)", (*params, 1)

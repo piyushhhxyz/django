@@ -1,6 +1,7 @@
 import gettext
 import json
 from os import path
+from unittest import mock
 
 from django.conf import settings
 from django.test import (
@@ -38,7 +39,7 @@ class SetLanguageTests(TestCase):
         lang_code = self._get_inactive_language_code()
         post_data = {"language": lang_code, "next": "/"}
         response = self.client.post(
-            "/i18n/setlang/", post_data, HTTP_REFERER="/i_should_not_be_used/"
+            "/i18n/setlang/", post_data, headers={"referer": "/i_should_not_be_used/"}
         )
         self.assertRedirects(response, "/")
         # The language is set in a cookie.
@@ -80,7 +81,7 @@ class SetLanguageTests(TestCase):
         )
         # Insecure URL in HTTP referer.
         response = self.client.post(
-            "/i18n/setlang/", secure=True, HTTP_REFERER=non_https_next_url
+            "/i18n/setlang/", secure=True, headers={"referer": non_https_next_url}
         )
         self.assertEqual(response.url, "/")
         self.assertEqual(
@@ -94,7 +95,9 @@ class SetLanguageTests(TestCase):
         """
         lang_code = self._get_inactive_language_code()
         post_data = {"language": lang_code}
-        response = self.client.post("/i18n/setlang/", post_data, HTTP_REFERER="/i18n/")
+        response = self.client.post(
+            "/i18n/setlang/", post_data, headers={"referer": "/i18n/"}
+        )
         self.assertRedirects(response, "/i18n/", fetch_redirect_response=False)
         self.assertEqual(
             self.client.cookies[settings.LANGUAGE_COOKIE_NAME].value, lang_code
@@ -121,7 +124,7 @@ class SetLanguageTests(TestCase):
         lang_code = self._get_inactive_language_code()
         post_data = {"language": lang_code, "next": "/"}
         response = self.client.post(
-            "/i18n/setlang/", post_data, HTTP_ACCEPT="application/json"
+            "/i18n/setlang/", post_data, headers={"accept": "application/json"}
         )
         self.assertRedirects(response, "/")
         self.assertEqual(
@@ -150,7 +153,7 @@ class SetLanguageTests(TestCase):
         lang_code = self._get_inactive_language_code()
         post_data = {"language": lang_code}
         response = self.client.post(
-            "/i18n/setlang/", post_data, HTTP_ACCEPT="application/json"
+            "/i18n/setlang/", post_data, headers={"accept": "application/json"}
         )
         self.assertEqual(response.status_code, 204)
         self.assertEqual(
@@ -165,7 +168,7 @@ class SetLanguageTests(TestCase):
         lang_code = self._get_inactive_language_code()
         post_data = {"language": lang_code, "next": "//unsafe/redirection/"}
         response = self.client.post(
-            "/i18n/setlang/", post_data, HTTP_ACCEPT="application/json"
+            "/i18n/setlang/", post_data, headers={"accept": "application/json"}
         )
         self.assertEqual(response.url, "/")
         self.assertEqual(
@@ -213,7 +216,7 @@ class SetLanguageTests(TestCase):
         # %C3%A4 decodes to ä, %26 to &.
         encoded_url = "/test-setlang/%C3%A4/?foo=bar&baz=alpha%26omega"
         response = self.client.post(
-            "/i18n/setlang/", {"language": lang_code}, HTTP_REFERER=encoded_url
+            "/i18n/setlang/", {"language": lang_code}, headers={"referer": encoded_url}
         )
         self.assertRedirects(response, encoded_url, fetch_redirect_response=False)
         self.assertEqual(
@@ -230,7 +233,7 @@ class SetLanguageTests(TestCase):
             "/i18n/setlang/",
             data={"language": "nl"},
             follow=True,
-            HTTP_REFERER="/en/translated/",
+            headers={"referer": "/en/translated/"},
         )
         self.assertEqual(self.client.cookies[settings.LANGUAGE_COOKIE_NAME].value, "nl")
         self.assertRedirects(response, "/nl/vertaald/")
@@ -239,7 +242,7 @@ class SetLanguageTests(TestCase):
             "/i18n/setlang/",
             data={"language": "en"},
             follow=True,
-            HTTP_REFERER="/nl/vertaald/",
+            headers={"referer": "/nl/vertaald/"},
         )
         self.assertRedirects(response, "/en/translated/")
 
@@ -269,8 +272,9 @@ class I18NViewTests(SimpleTestCase):
                     response.headers["Content-Type"], 'text/javascript; charset="utf-8"'
                 )
                 # response content must include a line like:
-                # "this is to be translated": <value of trans_txt Python variable>
-                # json.dumps() is used to be able to check Unicode strings.
+                # "this is to be translated": <value of trans_txt Python
+                # variable> json.dumps() is used to be able to check Unicode
+                # strings.
                 self.assertContains(response, json.dumps(trans_txt), 1)
                 if lang_code == "fr":
                     # Message with context (msgctxt)
@@ -292,7 +296,7 @@ class I18NViewTests(SimpleTestCase):
         """
         with override("de"):
             response = self.client.get("/jsoni18n/")
-            data = json.loads(response.content.decode())
+            data = json.loads(response.text)
             self.assertIn("catalog", data)
             self.assertIn("formats", data)
             self.assertEqual(
@@ -326,7 +330,7 @@ class I18NViewTests(SimpleTestCase):
         """
         with self.settings(LANGUAGE_CODE="es"), override("en-us"):
             response = self.client.get("/jsoni18n/")
-            data = json.loads(response.content.decode())
+            data = json.loads(response.text)
             self.assertIn("catalog", data)
             self.assertIn("formats", data)
             self.assertIn("plural", data)
@@ -343,6 +347,27 @@ class I18NViewTests(SimpleTestCase):
             response = self.client.get("/jsi18n/")
             self.assertContains(response, "il faut le traduire")
             self.assertNotContains(response, "Untranslated string")
+
+    def test_jsi18n_fallback_language_with_custom_locale_dir(self):
+        """
+        The fallback language works when there are several levels of fallback
+        translation catalogs.
+        """
+        locale_paths = [
+            path.join(
+                path.dirname(path.dirname(path.abspath(__file__))),
+                "custom_locale_path",
+            ),
+        ]
+        with self.settings(LOCALE_PATHS=locale_paths), override("es_MX"):
+            response = self.client.get("/jsi18n/")
+            self.assertContains(
+                response, "custom_locale_path: esto tiene que ser traducido"
+            )
+            response = self.client.get("/jsi18n_no_packages/")
+            self.assertContains(
+                response, "custom_locale_path: esto tiene que ser traducido"
+            )
 
     def test_i18n_fallback_language_plural(self):
         """
@@ -393,8 +418,9 @@ class I18NViewTests(SimpleTestCase):
     def test_non_english_default_english_userpref(self):
         """
         Same as above with the difference that there IS an 'en' translation
-        available. The JavaScript i18n view must return a NON empty language catalog
-        with the proper English translations. See #13726 for more details.
+        available. The JavaScript i18n view must return a NON empty language
+        catalog with the proper English translations. See #13726 for more
+        details.
         """
         with self.settings(LANGUAGE_CODE="fr"), override("en-us"):
             response = self.client.get("/jsi18n_english_translation/")
@@ -484,10 +510,23 @@ class I18NViewTests(SimpleTestCase):
         with self.assertRaisesMessage(ValueError, msg):
             view(request, packages="unknown_package+unknown_package2")
 
+    def test_template_encoding(self):
+        """
+        The template is loaded directly, not via a template loader, and should
+        be opened as utf-8 charset as is the default specified on template
+        engines.
+        """
+        from django.views.i18n import Path
+
+        view = JavaScriptCatalog.as_view()
+        request = RequestFactory().get("/")
+        with mock.patch.object(Path, "open") as m:
+            view(request)
+            m.assert_called_once_with(encoding="utf-8")
+
 
 @override_settings(ROOT_URLCONF="view_tests.urls")
 class I18nSeleniumTests(SeleniumTestCase):
-
     # The test cases use fixtures & translations from these apps.
     available_apps = [
         "django.contrib.admin",

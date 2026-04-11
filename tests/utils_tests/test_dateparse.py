@@ -15,14 +15,16 @@ class DateParseTests(unittest.TestCase):
         # Valid inputs
         self.assertEqual(parse_date("2012-04-23"), date(2012, 4, 23))
         self.assertEqual(parse_date("2012-4-9"), date(2012, 4, 9))
+        self.assertEqual(parse_date("20120423"), date(2012, 4, 23))
         # Invalid inputs
-        self.assertIsNone(parse_date("20120423"))
+        self.assertIsNone(parse_date("2012423"))
         with self.assertRaises(ValueError):
             parse_date("2012-04-56")
 
     def test_parse_time(self):
         # Valid inputs
         self.assertEqual(parse_time("09:15:00"), time(9, 15))
+        self.assertEqual(parse_time("091500"), time(9, 15))
         self.assertEqual(parse_time("10:10"), time(10, 10))
         self.assertEqual(parse_time("10:20:30.400"), time(10, 20, 30, 400000))
         self.assertEqual(parse_time("10:20:30,400"), time(10, 20, 30, 400000))
@@ -35,12 +37,13 @@ class DateParseTests(unittest.TestCase):
         self.assertIsNone(parse_time("00:05:23+"))
         self.assertIsNone(parse_time("00:05:23+25:00"))
         self.assertIsNone(parse_time("4:18:101"))
-        self.assertIsNone(parse_time("091500"))
+        self.assertIsNone(parse_time("91500"))
         with self.assertRaises(ValueError):
             parse_time("09:15:90")
 
     def test_parse_datetime(self):
         valid_inputs = (
+            ("2012-04-23", datetime(2012, 4, 23)),
             ("2012-04-23T09:15:00", datetime(2012, 4, 23, 9, 15)),
             ("2012-4-9 4:8:16", datetime(2012, 4, 9, 4, 8, 16)),
             (
@@ -191,7 +194,11 @@ class DurationParseTests(unittest.TestCase):
         test_values = (
             ("P4Y", None),
             ("P4M", None),
-            ("P4W", None),
+            ("P4W", timedelta(weeks=4)),
+            ("P0.5W", timedelta(weeks=0.5)),
+            ("P0,5W", timedelta(weeks=0.5)),
+            ("-P0.5W", timedelta(weeks=-0.5)),
+            ("P1W1D", timedelta(weeks=1, days=1)),
             ("P4D", timedelta(days=4)),
             ("-P1D", timedelta(days=-1)),
             ("P0.5D", timedelta(hours=12)),

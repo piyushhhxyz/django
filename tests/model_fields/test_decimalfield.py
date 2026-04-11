@@ -1,9 +1,11 @@
 import math
 from decimal import Decimal
+from unittest import mock
 
 from django.core import validators
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import connection, models
+from django.db.models import Max
 from django.test import TestCase
 
 from .models import BigD, Foo
@@ -48,6 +50,20 @@ class DecimalFieldTests(TestCase):
         self.assertIsNone(f.get_prep_value(None))
         self.assertEqual(f.get_prep_value("2.4"), Decimal("2.4"))
 
+    def test_get_db_prep_value(self):
+        """
+        DecimalField.get_db_prep_value() must call
+        DatabaseOperations.adapt_decimalfield_value().
+        """
+        f = models.DecimalField(max_digits=5, decimal_places=1)
+        # None of the built-in database backends implement
+        # adapt_decimalfield_value(), so this must be confirmed with mocking.
+        with mock.patch.object(
+            connection.ops.__class__, "adapt_decimalfield_value"
+        ) as adapt_decimalfield_value:
+            f.get_db_prep_value("2.4", connection)
+        adapt_decimalfield_value.assert_called_with(Decimal("2.4"), 5, 1)
+
     def test_filter_with_strings(self):
         """
         Should be able to filter decimal fields using strings (#8023).
@@ -67,10 +83,19 @@ class DecimalFieldTests(TestCase):
 
     def test_save_nan_invalid(self):
         msg = "“nan” value must be a decimal number."
-        with self.assertRaisesMessage(ValidationError, msg):
-            BigD.objects.create(d=float("nan"))
-        with self.assertRaisesMessage(ValidationError, msg):
-            BigD.objects.create(d=math.nan)
+        for value in [float("nan"), math.nan, "nan"]:
+            with self.subTest(value), self.assertRaisesMessage(ValidationError, msg):
+                BigD.objects.create(d=value)
+
+    def test_save_inf_invalid(self):
+        msg = "“inf” value must be a decimal number."
+        for value in [float("inf"), math.inf, "inf"]:
+            with self.subTest(value), self.assertRaisesMessage(ValidationError, msg):
+                BigD.objects.create(d=value)
+        msg = "“-inf” value must be a decimal number."
+        for value in [float("-inf"), -math.inf, "-inf"]:
+            with self.subTest(value), self.assertRaisesMessage(ValidationError, msg):
+                BigD.objects.create(d=value)
 
     def test_fetch_from_db_without_float_rounding(self):
         big_decimal = BigD.objects.create(d=Decimal(".100000000000000000000000000005"))
@@ -82,7 +107,10 @@ class DecimalFieldTests(TestCase):
         Really big values can be used in a filter statement.
         """
         # This should not crash.
-        Foo.objects.filter(d__gte=100000000000)
+        self.assertSequenceEqual(Foo.objects.filter(d__gte=100000000000), [])
+
+    def test_lookup_decimal_larger_than_max_digits(self):
+        self.assertSequenceEqual(Foo.objects.filter(d__lte=Decimal("123456")), [])
 
     def test_max_digits_validation(self):
         field = models.DecimalField(max_digits=2)
@@ -113,3 +141,20 @@ class DecimalFieldTests(TestCase):
         obj = Foo.objects.create(a="bar", d=Decimal("8.320"))
         obj.refresh_from_db()
         self.assertEqual(obj.d.compare_total(Decimal("8.320")), Decimal("0"))
+
+    def test_large_integer_precision(self):
+        large_int_val = Decimal("9999999999999999")
+        obj = BigD.objects.create(large_int=large_int_val, d=Decimal("0"))
+        obj.refresh_from_db()
+        self.assertEqual(obj.large_int, large_int_val)
+
+    def test_large_integer_precision_aggregation(self):
+        large_int_val = Decimal("9999999999999999")
+        BigD.objects.create(large_int=large_int_val, d=Decimal("0"))
+        result = BigD.objects.aggregate(max_val=Max("large_int"))
+        self.assertEqual(result["max_val"], large_int_val)
+
+    def test_roundtrip_integer_with_trailing_zeros(self):
+        obj = Foo.objects.create(a="bar", d=Decimal("8"))
+        obj.refresh_from_db()
+        self.assertEqual(obj.d.compare_total(Decimal("8.000")), Decimal("0"))

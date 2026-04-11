@@ -1,4 +1,4 @@
-from datetime import date, datetime, time, timezone, tzinfo
+from datetime import UTC, date, datetime, time, tzinfo
 
 from django.test import SimpleTestCase, override_settings
 from django.test.utils import TZ_SUPPORT, requires_tz_support
@@ -9,12 +9,10 @@ from django.utils.timezone import get_default_timezone, get_fixed_timezone, make
 
 @override_settings(TIME_ZONE="Europe/Copenhagen")
 class DateFormatTests(SimpleTestCase):
-    def setUp(self):
-        self._orig_lang = translation.get_language()
-        translation.activate("en-us")
-
-    def tearDown(self):
-        translation.activate(self._orig_lang)
+    @classmethod
+    def setUpClass(cls):
+        cls.enterClassContext(translation.override("en-us"))
+        super().setUpClass()
 
     def test_date(self):
         d = date(2009, 5, 16)
@@ -25,8 +23,7 @@ class DateFormatTests(SimpleTestCase):
         self.assertEqual(datetime.fromtimestamp(int(format(dt, "U"))), dt)
 
     def test_naive_ambiguous_datetime(self):
-        # dt is ambiguous in Europe/Copenhagen. pytz raises an exception for
-        # the ambiguity, which results in an empty string.
+        # dt is ambiguous in Europe/Copenhagen.
         dt = datetime(2015, 10, 25, 2, 30, 0)
 
         # Try all formatters that involve self.timezone.
@@ -51,7 +48,8 @@ class DateFormatTests(SimpleTestCase):
         dt = make_aware(datetime(2009, 5, 16, 5, 30, 30), ltz)
         self.assertEqual(datetime.fromtimestamp(int(format(dt, "U")), tz), dt)
         self.assertEqual(datetime.fromtimestamp(int(format(dt, "U")), ltz), dt)
-        # astimezone() is safe here because the target timezone doesn't have DST
+        # astimezone() is safe here because the target timezone doesn't have
+        # DST
         self.assertEqual(
             datetime.fromtimestamp(int(format(dt, "U"))),
             dt.astimezone(ltz).replace(tzinfo=None),
@@ -66,7 +64,7 @@ class DateFormatTests(SimpleTestCase):
         )
 
     def test_epoch(self):
-        udt = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        udt = datetime(1970, 1, 1, tzinfo=UTC)
         self.assertEqual(format(udt, "U"), "0")
 
     def test_empty_format(self):
@@ -200,7 +198,7 @@ class DateFormatTests(SimpleTestCase):
     def test_invalid_time_format_specifiers(self):
         my_birthday = date(1984, 8, 7)
 
-        for specifier in ["a", "A", "f", "g", "G", "h", "H", "i", "P", "r", "s", "u"]:
+        for specifier in ["a", "A", "f", "g", "G", "h", "H", "i", "P", "s", "u"]:
             with self.subTest(specifier=specifier):
                 msg = (
                     "The format for date objects may not contain time-related "
@@ -211,7 +209,7 @@ class DateFormatTests(SimpleTestCase):
 
     @requires_tz_support
     def test_e_format_with_named_time_zone(self):
-        dt = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        dt = datetime(1970, 1, 1, tzinfo=UTC)
         self.assertEqual(dateformat.format(dt, "e"), "UTC")
 
     @requires_tz_support
@@ -236,6 +234,14 @@ class DateFormatTests(SimpleTestCase):
         ]:
             with self.subTest(time=t):
                 self.assertEqual(dateformat.time_format(t, "P"), expected)
+
+    def test_r_format_with_date(self):
+        # Assume midnight in default timezone if datetime.date provided.
+        dt = date(2022, 7, 1)
+        self.assertEqual(
+            dateformat.format(dt, "r"),
+            "Fri, 01 Jul 2022 00:00:00 +0200",
+        )
 
     def test_r_format_with_non_en_locale(self):
         # Changing the locale doesn't change the "r" format.

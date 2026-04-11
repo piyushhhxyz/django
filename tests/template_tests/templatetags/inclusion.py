@@ -211,6 +211,16 @@ inclusion_tag_use_l10n.anything = "Expected inclusion_tag_use_l10n __dict__"
 
 
 @register.inclusion_tag('inclusion.html')
+def inclusion_keyword_only_param(*, kwarg):
+    return {"result": "inclusion_keyword_only_param - Expected result: %s" % kwarg}
+
+
+@register.inclusion_tag('inclusion.html')
+def inclusion_keyword_only_default(*, kwarg=42):
+    return {"result": "inclusion_keyword_only_default - Expected result: %s" % kwarg}
+
+
+@register.inclusion_tag('inclusion.html')
 def inclusion_unlimited_args_kwargs(one, two='hi', *args, **kwargs):
     """Expected inclusion_unlimited_args_kwargs __doc__"""
     # Sort the dictionary by key to guarantee the order for testing.

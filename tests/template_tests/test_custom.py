@@ -62,6 +62,8 @@ class SimpleTagTests(TagTestCase):
                 'simple_keyword_only_param - Expected result: 37'),
             ('{% load custom %}{% simple_keyword_only_default %}',
                 'simple_keyword_only_default - Expected result: 42'),
+            ('{% load custom %}{% simple_keyword_only_default kwarg=37 %}',
+                'simple_keyword_only_default - Expected result: 37'),
             ('{% load custom %}{% simple_one_default 37 %}', 'simple_one_default - Expected result: 37, hi'),
             ('{% load custom %}{% simple_one_default 37 two="hello" %}',
                 'simple_one_default - Expected result: 37, hello'),
@@ -97,6 +99,10 @@ class SimpleTagTests(TagTestCase):
                 '{% load custom %}{% simple_one_default 37 42 56 %}'),
             ("'simple_keyword_only_param' did not receive value(s) for the argument(s): 'kwarg'",
                 '{% load custom %}{% simple_keyword_only_param %}'),
+            ("'simple_keyword_only_param' received multiple values for keyword argument 'kwarg'",
+                '{% load custom %}{% simple_keyword_only_param kwarg=42 kwarg=37 %}'),
+            ("'simple_keyword_only_default' received unexpected keyword argument 'unexpected'",
+                '{% load custom %}{% simple_keyword_only_default unexpected=42 %}'),
             ("'simple_unlimited_args_kwargs' received some positional argument(s) after some keyword argument(s)",
                 '{% load custom %}{% simple_unlimited_args_kwargs 37 40|add:2 eggs="scrambled" 56 four=1|add:3 %}'),
             ("'simple_unlimited_args_kwargs' received multiple values for keyword argument 'eggs'",
@@ -190,6 +196,12 @@ class InclusionTagTests(TagTestCase):
                 'inclusion_only_unlimited_args - Expected result: 37, 42, 56, 89\n'),
             ('{% load inclusion %}{% inclusion_unlimited_args_kwargs 37 40|add:2 56 eggs="scrambled" four=1|add:3 %}',
                 'inclusion_unlimited_args_kwargs - Expected result: 37, 42, 56 / eggs=scrambled, four=4\n'),
+            ('{% load inclusion %}{% inclusion_keyword_only_param kwarg=37 %}',
+                'inclusion_keyword_only_param - Expected result: 37\n'),
+            ('{% load inclusion %}{% inclusion_keyword_only_default %}',
+                'inclusion_keyword_only_default - Expected result: 42\n'),
+            ('{% load inclusion %}{% inclusion_keyword_only_default kwarg=37 %}',
+                'inclusion_keyword_only_default - Expected result: 37\n'),
         ]
 
         for entry in templates:
@@ -215,6 +227,12 @@ class InclusionTagTests(TagTestCase):
             ),
             ("'inclusion_unlimited_args_kwargs' received multiple values for keyword argument 'eggs'",
                 '{% load inclusion %}{% inclusion_unlimited_args_kwargs 37 eggs="scrambled" eggs="scrambled" %}'),
+            ("'inclusion_keyword_only_param' did not receive value(s) for the argument(s): 'kwarg'",
+                '{% load inclusion %}{% inclusion_keyword_only_param %}'),
+            ("'inclusion_keyword_only_param' received multiple values for keyword argument 'kwarg'",
+                '{% load inclusion %}{% inclusion_keyword_only_param kwarg=42 kwarg=37 %}'),
+            ("'inclusion_keyword_only_default' received unexpected keyword argument 'unexpected'",
+                '{% load inclusion %}{% inclusion_keyword_only_default unexpected=42 %}'),
         ]
 
         for entry in errors:

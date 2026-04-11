@@ -518,6 +518,22 @@ class TestQuerying(TestCase):
             [self.objs[4]],
         )
 
+    def test_has_key_number(self):
+        # has_key, has_keys, and has_any_keys should handle numeric keys.
+        obj = NullableJSONModel.objects.create(value={"1111": "foo"})
+        self.assertSequenceEqual(
+            NullableJSONModel.objects.filter(value__has_key="1111"),
+            [obj],
+        )
+        self.assertSequenceEqual(
+            NullableJSONModel.objects.filter(value__has_keys=["1111"]),
+            [obj],
+        )
+        self.assertSequenceEqual(
+            NullableJSONModel.objects.filter(value__has_any_keys=["1111"]),
+            [obj],
+        )
+
     def test_has_key_deep(self):
         tests = [
             (Q(value__baz__has_key="a"), self.objs[7]),

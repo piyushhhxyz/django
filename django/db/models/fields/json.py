@@ -191,14 +191,13 @@ class HasKeyLookup(PostgresOperatorLookup):
         for key in rhs:
             if isinstance(key, KeyTransform):
                 *_, rhs_key_transforms = key.preprocess_lhs(compiler, connection)
-            else:
-                rhs_key_transforms = [key]
-            rhs_params.append(
-                "%s%s"
-                % (
-                    lhs_json_path,
-                    compile_json_path(rhs_key_transforms, include_root=False),
+                rhs_json_path = compile_json_path(
+                    rhs_key_transforms, include_root=False
                 )
+            else:
+                rhs_json_path = ".%s" % json.dumps(key)
+            rhs_params.append(
+                "%s%s" % (lhs_json_path, rhs_json_path)
             )
         # Add condition for each key.
         if self.logical_operator:
@@ -387,25 +386,21 @@ class KeyTransformTextLookupMixin:
 class KeyTransformIsNull(lookups.IsNull):
     # key__isnull=False is the same as has_key='key'
     def as_oracle(self, compiler, connection):
-        sql, params = HasKey(
-            self.lhs.lhs,
-            self.lhs.key_name,
-        ).as_oracle(compiler, connection)
+        lhs, params, key_transforms = self.lhs.preprocess_lhs(compiler, connection)
+        json_path = compile_json_path(key_transforms)
+        sql = "JSON_EXISTS(%s, '%s')" % (lhs, json_path)
         if not self.rhs:
-            return sql, params
+            return sql, tuple(params)
         # Column doesn't have a key or IS NULL.
-        lhs, lhs_params, _ = self.lhs.preprocess_lhs(compiler, connection)
-        return "(NOT %s OR %s IS NULL)" % (sql, lhs), tuple(params) + tuple(lhs_params)
+        return "(NOT %s OR %s IS NULL)" % (sql, lhs), tuple(params) + tuple(params)
 
     def as_sqlite(self, compiler, connection):
         template = "JSON_TYPE(%s, %%s) IS NULL"
         if not self.rhs:
             template = "JSON_TYPE(%s, %%s) IS NOT NULL"
-        return HasKey(self.lhs.lhs, self.lhs.key_name).as_sql(
-            compiler,
-            connection,
-            template=template,
-        )
+        lhs, params, key_transforms = self.lhs.preprocess_lhs(compiler, connection)
+        json_path = compile_json_path(key_transforms)
+        return template % lhs, tuple(params) + (json_path,)
 
 
 class KeyTransformIn(lookups.In):

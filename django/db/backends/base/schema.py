@@ -1038,6 +1038,9 @@ class BaseDatabaseSchemaEditor:
         for old_rel, new_rel in rels_to_update:
             rel_db_params = new_rel.field.db_parameters(connection=self.connection)
             rel_type = rel_db_params["type"]
+            rel_collation = rel_db_params.get("collation")
+            if rel_collation:
+                rel_type += " %s" % self._collate_sql(rel_collation)
             fragment, other_actions = self._alter_column_type_sql(
                 new_rel.related_model, old_rel.field, new_rel.field, rel_type
             )

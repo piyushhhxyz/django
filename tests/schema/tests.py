@@ -4633,6 +4633,43 @@ class SchemaTests(TransactionTestCase):
         self.assertEqual(self.get_primary_key(Thing._meta.db_table), "when")
         self.assertIsNone(self.get_column_collation(Thing._meta.db_table, "when"))
 
+    @isolate_apps("schema")
+    @skipUnlessDBFeature("supports_collation_on_charfield")
+    def test_db_collation_charfield_fk_propagation(self):
+        collation = connection.features.test_collations.get("non_default")
+        if not collation:
+            self.skipTest("Language collations are not supported.")
+
+        class Account(Model):
+            id = CharField(
+                primary_key=True, max_length=22, db_collation=collation
+            )
+
+            class Meta:
+                app_label = "schema"
+
+        class Profile(Model):
+            account = ForeignKey(Account, on_delete=CASCADE)
+
+            class Meta:
+                app_label = "schema"
+
+        # Verify FK db_parameters propagates collation from the target field.
+        fk_field = Profile._meta.get_field("account")
+        fk_db_params = fk_field.db_parameters(connection=connection)
+        self.assertEqual(fk_db_params["collation"], collation)
+
+        # Verify the collation is included in the column SQL.
+        self.isolated_local_models = [Account, Profile]
+        with connection.schema_editor() as editor:
+            editor.create_model(Account)
+            editor.create_model(Profile)
+
+        self.assertEqual(
+            self.get_column_collation(Profile._meta.db_table, "account_id"),
+            collation,
+        )
+
     @skipUnlessDBFeature(
         "supports_collation_on_charfield", "supports_collation_on_textfield"
     )

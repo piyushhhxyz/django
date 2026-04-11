@@ -29,6 +29,7 @@ class JSONFieldTest(SimpleTestCase):
         self.assertEqual(field.prepare_value({'a': 'b'}), '{"a": "b"}')
         self.assertEqual(field.prepare_value(None), 'null')
         self.assertEqual(field.prepare_value('foo'), '"foo"')
+        self.assertEqual(field.prepare_value({'a': '中国'}), '{"a": "中国"}')
 
     def test_widget(self):
         field = JSONField()

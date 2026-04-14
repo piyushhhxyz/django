@@ -127,6 +127,19 @@ class QuerySetSetOperationTests(TestCase):
         reserved_name = qs1.union(qs1).values_list('order').get()
         self.assertEqual(reserved_name, (2,))
 
+    def test_union_with_values_list_and_order_by_does_not_mutate_original(self):
+        qs1 = Number.objects.filter(num__lte=1)
+        qs2 = Number.objects.filter(num__gte=8)
+        qs = qs1.union(qs2).order_by('num')
+        # Deriving a values_list queryset from a union should not modify the
+        # original queryset's combined sub-queries.
+        self.assertNumbersEqual(qs, [0, 1, 8, 9])
+        # Derive a new queryset with different ordering and values.
+        qs_derived = qs.order_by().values_list('num', flat=True)
+        self.assertCountEqual(list(qs_derived), [0, 1, 8, 9])
+        # The original queryset should still work correctly.
+        self.assertNumbersEqual(qs, [0, 1, 8, 9])
+
     def test_union_with_two_annotated_values_list(self):
         qs1 = Number.objects.filter(num=1).annotate(
             count=Value(0, IntegerField()),

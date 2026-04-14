@@ -78,10 +78,6 @@ e.g. with the ``'de'`` language:
 * ``1200000000`` becomes ``'1,2 Milliarden'``.
 * ``-1200000000`` becomes ``'-1,2 Milliarden'``.
 
-.. versionchanged:: 3.1
-
-    Support for negative integers was added.
-
 .. templatefilter:: naturalday
 
 ``naturalday``
@@ -147,3 +143,4 @@ Examples:
 * ``3`` becomes ``3rd``.
 
 You can pass in either an integer or a string representation of an integer.
+Negative integers are returned unchanged.

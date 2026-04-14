@@ -1,4 +1,5 @@
 from functools import wraps
+from inspect import iscoroutinefunction
 
 
 def xframe_options_deny(view_func):
@@ -11,12 +12,24 @@ def xframe_options_deny(view_func):
     def some_view(request):
         ...
     """
-    def wrapped_view(*args, **kwargs):
-        resp = view_func(*args, **kwargs)
-        if resp.get('X-Frame-Options') is None:
-            resp['X-Frame-Options'] = 'DENY'
-        return resp
-    return wraps(view_func)(wrapped_view)
+
+    if iscoroutinefunction(view_func):
+
+        async def _view_wrapper(*args, **kwargs):
+            response = await view_func(*args, **kwargs)
+            if response.get("X-Frame-Options") is None:
+                response["X-Frame-Options"] = "DENY"
+            return response
+
+    else:
+
+        def _view_wrapper(*args, **kwargs):
+            response = view_func(*args, **kwargs)
+            if response.get("X-Frame-Options") is None:
+                response["X-Frame-Options"] = "DENY"
+            return response
+
+    return wraps(view_func)(_view_wrapper)
 
 
 def xframe_options_sameorigin(view_func):
@@ -29,12 +42,24 @@ def xframe_options_sameorigin(view_func):
     def some_view(request):
         ...
     """
-    def wrapped_view(*args, **kwargs):
-        resp = view_func(*args, **kwargs)
-        if resp.get('X-Frame-Options') is None:
-            resp['X-Frame-Options'] = 'SAMEORIGIN'
-        return resp
-    return wraps(view_func)(wrapped_view)
+
+    if iscoroutinefunction(view_func):
+
+        async def _view_wrapper(*args, **kwargs):
+            response = await view_func(*args, **kwargs)
+            if response.get("X-Frame-Options") is None:
+                response["X-Frame-Options"] = "SAMEORIGIN"
+            return response
+
+    else:
+
+        def _view_wrapper(*args, **kwargs):
+            response = view_func(*args, **kwargs)
+            if response.get("X-Frame-Options") is None:
+                response["X-Frame-Options"] = "SAMEORIGIN"
+            return response
+
+    return wraps(view_func)(_view_wrapper)
 
 
 def xframe_options_exempt(view_func):
@@ -46,8 +71,19 @@ def xframe_options_exempt(view_func):
     def some_view(request):
         ...
     """
-    def wrapped_view(*args, **kwargs):
-        resp = view_func(*args, **kwargs)
-        resp.xframe_options_exempt = True
-        return resp
-    return wraps(view_func)(wrapped_view)
+
+    if iscoroutinefunction(view_func):
+
+        async def _view_wrapper(*args, **kwargs):
+            response = await view_func(*args, **kwargs)
+            response.xframe_options_exempt = True
+            return response
+
+    else:
+
+        def _view_wrapper(*args, **kwargs):
+            response = view_func(*args, **kwargs)
+            response.xframe_options_exempt = True
+            return response
+
+    return wraps(view_func)(_view_wrapper)

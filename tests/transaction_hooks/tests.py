@@ -1,3 +1,5 @@
+from functools import partial
+
 from django.db import connection, transaction
 from django.test import TransactionTestCase, skipUnlessDBFeature
 
@@ -8,6 +10,7 @@ class ForcedError(Exception):
     pass
 
 
+@skipUnlessDBFeature("supports_transactions")
 class TestConnectionOnCommit(TransactionTestCase):
     """
     Tests for transaction.on_commit().
@@ -15,13 +18,14 @@ class TestConnectionOnCommit(TransactionTestCase):
     Creation/checking of database objects in parallel with callback tracking is
     to verify that the behavior of the two match in all tested cases.
     """
-    available_apps = ['transaction_hooks']
+
+    available_apps = ["transaction_hooks"]
 
     def setUp(self):
         self.notified = []
 
     def notify(self, id_):
-        if id_ == 'error':
+        if id_ == "error":
             raise ForcedError()
         self.notified.append(id_)
 
@@ -40,6 +44,92 @@ class TestConnectionOnCommit(TransactionTestCase):
     def test_executes_immediately_if_no_transaction(self):
         self.do(1)
         self.assertDone([1])
+
+    def test_robust_if_no_transaction(self):
+        def robust_callback():
+            raise ForcedError("robust callback")
+
+        with self.assertLogs("django.db.backends.base", "ERROR") as cm:
+            transaction.on_commit(robust_callback, robust=True)
+            self.do(1)
+
+        self.assertDone([1])
+        log_record = cm.records[0]
+        self.assertEqual(
+            log_record.getMessage(),
+            "Error calling TestConnectionOnCommit.test_robust_if_no_transaction."
+            "<locals>.robust_callback in on_commit() (robust callback).",
+        )
+        self.assertIsNotNone(log_record.exc_info)
+        raised_exception = log_record.exc_info[1]
+        self.assertIsInstance(raised_exception, ForcedError)
+        self.assertEqual(str(raised_exception), "robust callback")
+
+    def test_robust_if_no_transaction_with_callback_as_partial(self):
+        def robust_callback():
+            raise ForcedError("robust callback")
+
+        robust_callback_partial = partial(robust_callback)
+
+        with self.assertLogs("django.db.backends.base", "ERROR") as cm:
+            transaction.on_commit(robust_callback_partial, robust=True)
+            self.do(1)
+
+        self.assertDone([1])
+        log_record = cm.records[0]
+        self.assertEqual(
+            log_record.getMessage(),
+            f"Error calling {robust_callback_partial} "
+            f"in on_commit() (robust callback).",
+        )
+        self.assertIsNotNone(log_record.exc_info)
+        raised_exception = log_record.exc_info[1]
+        self.assertIsInstance(raised_exception, ForcedError)
+        self.assertEqual(str(raised_exception), "robust callback")
+
+    def test_robust_transaction(self):
+        def robust_callback():
+            raise ForcedError("robust callback")
+
+        with self.assertLogs("django.db.backends", "ERROR") as cm:
+            with transaction.atomic():
+                transaction.on_commit(robust_callback, robust=True)
+                self.do(1)
+
+        self.assertDone([1])
+        log_record = cm.records[0]
+        self.assertEqual(
+            log_record.getMessage(),
+            "Error calling TestConnectionOnCommit.test_robust_transaction.<locals>."
+            "robust_callback in on_commit() during transaction (robust callback).",
+        )
+        self.assertIsNotNone(log_record.exc_info)
+        raised_exception = log_record.exc_info[1]
+        self.assertIsInstance(raised_exception, ForcedError)
+        self.assertEqual(str(raised_exception), "robust callback")
+
+    def test_robust_transaction_with_callback_as_partial(self):
+        def robust_callback():
+            raise ForcedError("robust callback")
+
+        robust_callback_partial = partial(robust_callback)
+
+        with self.assertLogs("django.db.backends", "ERROR") as cm:
+            with transaction.atomic():
+                transaction.on_commit(robust_callback_partial, robust=True)
+                self.do(1)
+
+        self.assertDone([1])
+        log_record = cm.records[0]
+        self.assertEqual(
+            log_record.getMessage(),
+            f"Error calling {robust_callback_partial} in on_commit() during "
+            "transaction (robust callback).",
+        )
+        self.assertIsNotNone(log_record.exc_info)
+        raised_exception = log_record.exc_info[1]
+        self.assertIsInstance(raised_exception, ForcedError)
+        self.assertEqual(str(raised_exception), "robust callback")
 
     def test_delays_execution_until_after_transaction_commit(self):
         with transaction.atomic():
@@ -65,6 +155,7 @@ class TestConnectionOnCommit(TransactionTestCase):
             self.assertNotified([])
         self.assertDone([1])
 
+    @skipUnlessDBFeature("uses_savepoints")
     def test_discards_hooks_from_rolled_back_savepoint(self):
         with transaction.atomic():
             # one successful savepoint
@@ -96,6 +187,7 @@ class TestConnectionOnCommit(TransactionTestCase):
 
         self.assertDone([])
 
+    @skipUnlessDBFeature("uses_savepoints")
     def test_inner_savepoint_rolled_back_with_outer(self):
         with transaction.atomic():
             try:
@@ -121,6 +213,7 @@ class TestConnectionOnCommit(TransactionTestCase):
 
         self.assertDone([])
 
+    @skipUnlessDBFeature("uses_savepoints")
     def test_inner_savepoint_does_not_affect_outer(self):
         with transaction.atomic():
             with transaction.atomic():
@@ -163,7 +256,7 @@ class TestConnectionOnCommit(TransactionTestCase):
 
         self.assertDone([2])
 
-    @skipUnlessDBFeature('test_db_allows_multiple_connections')
+    @skipUnlessDBFeature("test_db_allows_multiple_connections")
     def test_hooks_cleared_on_reconnect(self):
         with transaction.atomic():
             self.do(1)
@@ -179,7 +272,7 @@ class TestConnectionOnCommit(TransactionTestCase):
     def test_error_in_hook_doesnt_prevent_clearing_hooks(self):
         try:
             with transaction.atomic():
-                transaction.on_commit(lambda: self.notify('error'))
+                transaction.on_commit(lambda: self.notify("error"))
         except ForcedError:
             pass
 
@@ -224,12 +317,17 @@ class TestConnectionOnCommit(TransactionTestCase):
 
     def test_raises_exception_non_autocommit_mode(self):
         def should_never_be_called():
-            raise AssertionError('this function should never be called')
+            raise AssertionError("this function should never be called")
 
         try:
             connection.set_autocommit(False)
-            msg = 'on_commit() cannot be used in manual transaction management'
+            msg = "on_commit() cannot be used in manual transaction management"
             with self.assertRaisesMessage(transaction.TransactionManagementError, msg):
                 transaction.on_commit(should_never_be_called)
         finally:
             connection.set_autocommit(True)
+
+    def test_raises_exception_non_callable(self):
+        msg = "on_commit()'s callback must be a callable."
+        with self.assertRaisesMessage(TypeError, msg):
+            transaction.on_commit(None)

@@ -1,6 +1,8 @@
 """Models for test_natural.py"""
+
 import uuid
 
+from django.contrib.auth.base_user import AbstractBaseUser
 from django.db import models
 
 
@@ -25,8 +27,12 @@ class FKDataNaturalKey(models.Model):
 
 class NaturalKeyThing(models.Model):
     key = models.CharField(max_length=100, unique=True)
-    other_thing = models.ForeignKey('NaturalKeyThing', on_delete=models.CASCADE, null=True)
-    other_things = models.ManyToManyField('NaturalKeyThing', related_name='thing_m2m_set')
+    other_thing = models.ForeignKey(
+        "NaturalKeyThing", on_delete=models.CASCADE, null=True
+    )
+    other_things = models.ManyToManyField(
+        "NaturalKeyThing", related_name="thing_m2m_set"
+    )
 
     class Manager(models.Manager):
         def get_by_natural_key(self, key):
@@ -53,3 +59,63 @@ class NaturalPKWithDefault(models.Model):
 
     def natural_key(self):
         return (self.name,)
+
+
+class FKAsPKNoNaturalKeyManager(models.Manager):
+    def get_by_natural_key(self, *args, **kwargs):
+        return super().get_by_natural_key(*args, **kwargs)
+
+
+class FKAsPKNoNaturalKey(models.Model):
+    pk_fk = models.ForeignKey(
+        NaturalKeyAnchor, on_delete=models.CASCADE, primary_key=True
+    )
+
+    objects = FKAsPKNoNaturalKeyManager()
+
+    def natural_key(self):
+        raise NotImplementedError("This method was not expected to be called.")
+
+
+class SubclassNaturalKeyOptOutUser(AbstractBaseUser):
+    email = models.EmailField(unique=False, null=True, blank=True)
+    USERNAME_FIELD = "email"
+
+    def natural_key(self):
+        return ()
+
+
+class PostToOptOutSubclassUser(models.Model):
+    author = models.ForeignKey(SubclassNaturalKeyOptOutUser, on_delete=models.CASCADE)
+    title = models.CharField(max_length=100)
+    subscribers = models.ManyToManyField(
+        SubclassNaturalKeyOptOutUser, related_name="subscribed_posts", blank=True
+    )
+
+
+class NaturalKeyWithNullableFieldManager(models.Manager):
+    def get_by_natural_key(self, name, optional_id):
+        return self.get(name=name, optional_id=optional_id)
+
+
+class NaturalKeyWithNullableField(models.Model):
+    name = models.CharField(max_length=100)
+    optional_id = models.CharField(max_length=100, null=True, blank=True)
+
+    objects = NaturalKeyWithNullableFieldManager()
+
+    class Meta:
+        unique_together = [["name", "optional_id"]]
+
+    def natural_key(self):
+        return (self.name, self.optional_id)
+
+
+class FKToNaturalKeyWithNullable(models.Model):
+    ref = models.ForeignKey(
+        NaturalKeyWithNullableField, on_delete=models.CASCADE, null=True
+    )
+    refs = models.ManyToManyField(
+        NaturalKeyWithNullableField, related_name="m2m_referrers"
+    )
+    data = models.CharField(max_length=100, default="")

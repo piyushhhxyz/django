@@ -1,6 +1,7 @@
 """
 Tests for built in Function expressions.
 """
+
 from django.db import models
 
 
@@ -12,7 +13,7 @@ class Author(models.Model):
 
 
 class Article(models.Model):
-    authors = models.ManyToManyField(Author, related_name='articles')
+    authors = models.ManyToManyField(Author, related_name="articles")
     title = models.CharField(max_length=50)
     summary = models.CharField(max_length=200, null=True, blank=True)
     text = models.TextField()
@@ -25,7 +26,7 @@ class Article(models.Model):
 class Fan(models.Model):
     name = models.CharField(max_length=50)
     age = models.PositiveSmallIntegerField(default=30)
-    author = models.ForeignKey(Author, models.CASCADE, related_name='fans')
+    author = models.ForeignKey(Author, models.CASCADE, related_name="fans")
     fan_since = models.DateTimeField(null=True, blank=True)
 
 
@@ -42,7 +43,7 @@ class DTModel(models.Model):
 
 class DecimalModel(models.Model):
     n1 = models.DecimalField(decimal_places=2, max_digits=6)
-    n2 = models.DecimalField(decimal_places=2, max_digits=6)
+    n2 = models.DecimalField(decimal_places=7, max_digits=9, null=True, blank=True)
 
 
 class IntegerModel(models.Model):
@@ -54,3 +55,8 @@ class IntegerModel(models.Model):
 class FloatModel(models.Model):
     f1 = models.FloatField(null=True, blank=True)
     f2 = models.FloatField(null=True, blank=True)
+
+
+class UUIDModel(models.Model):
+    uuid = models.UUIDField(null=True)
+    shift = models.DurationField(null=True)

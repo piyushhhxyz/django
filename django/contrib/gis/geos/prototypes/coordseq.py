@@ -1,8 +1,14 @@
 from ctypes import POINTER, c_byte, c_double, c_int, c_uint
 
-from django.contrib.gis.geos.libgeos import CS_PTR, GEOM_PTR, GEOSFuncFactory
+from django.contrib.gis.geos.libgeos import (
+    CS_PTR,
+    GEOM_PTR,
+    GEOSFuncFactory,
+)
 from django.contrib.gis.geos.prototypes.errcheck import (
-    GEOSException, last_arg_byref,
+    GEOSException,
+    check_predicate,
+    last_arg_byref,
 )
 
 
@@ -10,7 +16,7 @@ from django.contrib.gis.geos.prototypes.errcheck import (
 def check_cs_op(result, func, cargs):
     "Check the status code of a coordinate sequence operation."
     if result == 0:
-        raise GEOSException('Could not set value on coordinate sequence')
+        raise GEOSException("Could not set value on coordinate sequence")
     else:
         return result
 
@@ -25,6 +31,7 @@ def check_cs_get(result, func, cargs):
 # ## Coordinate sequence prototype factory classes. ##
 class CsInt(GEOSFuncFactory):
     "For coordinate sequence routines that return an integer."
+
     argtypes = [CS_PTR, POINTER(c_uint)]
     restype = c_int
     errcheck = staticmethod(check_cs_get)
@@ -32,6 +39,7 @@ class CsInt(GEOSFuncFactory):
 
 class CsOperation(GEOSFuncFactory):
     "For coordinate sequence operations."
+
     restype = c_int
 
     def __init__(self, *args, ordinate=False, get=False, **kwargs):
@@ -49,7 +57,9 @@ class CsOperation(GEOSFuncFactory):
         else:
             argtypes = [CS_PTR, c_uint, dbl_param]
 
-        super().__init__(*args, **{**kwargs, 'errcheck': errcheck, 'argtypes': argtypes})
+        super().__init__(
+            *args, **{**kwargs, "errcheck": errcheck, "argtypes": argtypes}
+        )
 
 
 class CsOutput(GEOSFuncFactory):
@@ -59,35 +69,48 @@ class CsOutput(GEOSFuncFactory):
     def errcheck(result, func, cargs):
         if not result:
             raise GEOSException(
-                'Error encountered checking Coordinate Sequence returned from GEOS '
+                "Error encountered checking Coordinate Sequence returned from GEOS "
                 'C function "%s".' % func.__name__
             )
         return result
 
 
+class CsUnaryPredicate(GEOSFuncFactory):
+    argtypes = [CS_PTR]
+    restype = c_byte
+    errcheck = staticmethod(check_predicate)
+
+
 # ## Coordinate Sequence ctypes prototypes ##
 
 # Coordinate Sequence constructors & cloning.
-cs_clone = CsOutput('GEOSCoordSeq_clone', argtypes=[CS_PTR])
-create_cs = CsOutput('GEOSCoordSeq_create', argtypes=[c_uint, c_uint])
-get_cs = CsOutput('GEOSGeom_getCoordSeq', argtypes=[GEOM_PTR])
+cs_clone = CsOutput("GEOSCoordSeq_clone", argtypes=[CS_PTR])
+create_cs = CsOutput("GEOSCoordSeq_create", argtypes=[c_uint, c_uint])
+get_cs = CsOutput("GEOSGeom_getCoordSeq", argtypes=[GEOM_PTR])
 
 # Getting, setting ordinate
-cs_getordinate = CsOperation('GEOSCoordSeq_getOrdinate', ordinate=True, get=True)
-cs_setordinate = CsOperation('GEOSCoordSeq_setOrdinate', ordinate=True)
+cs_getordinate = CsOperation("GEOSCoordSeq_getOrdinate", ordinate=True, get=True)
+cs_setordinate = CsOperation("GEOSCoordSeq_setOrdinate", ordinate=True)
 
-# For getting, x, y, z
-cs_getx = CsOperation('GEOSCoordSeq_getX', get=True)
-cs_gety = CsOperation('GEOSCoordSeq_getY', get=True)
-cs_getz = CsOperation('GEOSCoordSeq_getZ', get=True)
+# For getting, x, y, z, m
+cs_getx = CsOperation("GEOSCoordSeq_getX", get=True)
+cs_gety = CsOperation("GEOSCoordSeq_getY", get=True)
+cs_getz = CsOperation("GEOSCoordSeq_getZ", get=True)
+cs_getm = CsOperation("GEOSCoordSeq_getM", get=True)
 
-# For setting, x, y, z
-cs_setx = CsOperation('GEOSCoordSeq_setX')
-cs_sety = CsOperation('GEOSCoordSeq_setY')
-cs_setz = CsOperation('GEOSCoordSeq_setZ')
+# For setting, x, y, z, m
+cs_setx = CsOperation("GEOSCoordSeq_setX")
+cs_sety = CsOperation("GEOSCoordSeq_setY")
+cs_setz = CsOperation("GEOSCoordSeq_setZ")
+cs_setm = CsOperation("GEOSCoordSeq_setM")
 
 # These routines return size & dimensions.
-cs_getsize = CsInt('GEOSCoordSeq_getSize')
-cs_getdims = CsInt('GEOSCoordSeq_getDimensions')
+cs_getsize = CsInt("GEOSCoordSeq_getSize")
+cs_getdims = CsInt("GEOSCoordSeq_getDimensions")
 
-cs_is_ccw = GEOSFuncFactory('GEOSCoordSeq_isCCW', restype=c_int, argtypes=[CS_PTR, POINTER(c_byte)])
+# Unary Predicates
+cs_hasm = CsUnaryPredicate("GEOSCoordSeq_hasM")
+
+cs_is_ccw = GEOSFuncFactory(
+    "GEOSCoordSeq_isCCW", restype=c_int, argtypes=[CS_PTR, POINTER(c_byte)]
+)

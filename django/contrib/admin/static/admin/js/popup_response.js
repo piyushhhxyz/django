@@ -1,4 +1,3 @@
-/*global opener */
 'use strict';
 {
     const initData = JSON.parse(document.getElementById('django-admin-popup-response-constants').dataset.popupResponse);
@@ -10,7 +9,7 @@
         opener.dismissDeleteRelatedObjectPopup(window, initData.value);
         break;
     default:
-        opener.dismissAddRelatedObjectPopup(window, initData.value, initData.obj);
+        opener.dismissAddRelatedObjectPopup(window, initData.value, initData.obj, initData.optgroup);
         break;
     }
 }

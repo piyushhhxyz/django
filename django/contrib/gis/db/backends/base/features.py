@@ -2,18 +2,24 @@ import re
 
 from django.contrib.gis.db import models
 
+from .operations import BaseSpatialOperations
+
 
 class BaseSpatialFeatures:
     gis_enabled = True
 
-    # Does the database contain a SpatialRefSys model to store SRID information?
+    # Does the database contain a SpatialRefSys model to store SRID
+    # information?
     has_spatialrefsys_table = True
 
-    # Does the backend support the django.contrib.gis.utils.add_srs_entry() utility?
+    # Does the backend support the django.contrib.gis.utils.add_srs_entry()
+    # utility?
     supports_add_srs_entry = True
     # Does the backend introspect GeometryField to its subtypes?
     supports_geometry_field_introspection = True
 
+    # Does the database have a geography type?
+    supports_geography = False
     # Does the backend support storing 3D geometries?
     supports_3d_storage = False
     # Reference implementation of 3D functions is:
@@ -33,9 +39,6 @@ class BaseSpatialFeatures:
     # Is the database able to count vertices on polygons (with `num_points`)?
     supports_num_points_poly = True
 
-    # The following properties indicate if the database backend support
-    # certain lookups (dwithin, left and right, relate, ...)
-    supports_left_right_lookups = False
     # Does the backend support expressions for specifying distance in the
     # dwithin lookup?
     supports_dwithin_distance_expr = True
@@ -46,29 +49,30 @@ class BaseSpatialFeatures:
     # Does the database support a unique index on geometry fields?
     supports_geometry_field_unique_index = True
 
-    @property
-    def supports_bbcontains_lookup(self):
-        return 'bbcontains' in self.connection.ops.gis_operators
+    # Can SchemaEditor alter geometry fields?
+    can_alter_geometry_field = True
 
-    @property
-    def supports_contained_lookup(self):
-        return 'contained' in self.connection.ops.gis_operators
+    # Do the database functions/aggregates support the tolerance parameter?
+    supports_tolerance_parameter = False
+
+    # Set of options that AsGeoJSON() doesn't support.
+    unsupported_geojson_options = {}
+
+    # Does Intersection() return None (rather than an empty GeometryCollection)
+    # for empty results?
+    empty_intersection_returns_none = True
 
     @property
     def supports_crosses_lookup(self):
-        return 'crosses' in self.connection.ops.gis_operators
+        return "crosses" in self.connection.ops.gis_operators
 
     @property
     def supports_distances_lookups(self):
         return self.has_Distance_function
 
     @property
-    def supports_dwithin_lookup(self):
-        return 'dwithin' in self.connection.ops.gis_operators
-
-    @property
     def supports_relate_lookup(self):
-        return 'relate' in self.connection.ops.gis_operators
+        return "relate" in self.connection.ops.gis_operators
 
     @property
     def supports_isvalid_lookup(self):
@@ -92,8 +96,14 @@ class BaseSpatialFeatures:
         return models.Union not in self.connection.ops.disallowed_aggregates
 
     def __getattr__(self, name):
-        m = re.match(r'has_(\w*)_function$', name)
+        m = re.match(r"has_(\w*)_function$", name)
         if m:
             func_name = m[1]
+            if func_name not in BaseSpatialOperations.unsupported_functions:
+                raise ValueError(
+                    f"DatabaseFeatures.has_{func_name}_function isn't valid. "
+                    f'Is "{func_name}" missing from '
+                    "BaseSpatialOperations.unsupported_functions?"
+                )
             return func_name not in self.connection.ops.unsupported_functions
         raise AttributeError

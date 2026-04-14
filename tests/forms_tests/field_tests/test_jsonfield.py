@@ -30,6 +30,17 @@ class JSONFieldTest(SimpleTestCase):
         self.assertEqual(field.prepare_value(None), 'null')
         self.assertEqual(field.prepare_value('foo'), '"foo"')
 
+    def test_prepare_value_unicode(self):
+        field = JSONField()
+        # Non-ASCII characters should be displayed as-is, not escaped.
+        self.assertEqual(field.prepare_value('中国'), '"中国"')
+        self.assertEqual(field.prepare_value({'key': '中国'}), '{"key": "中国"}')
+        self.assertEqual(
+            field.prepare_value(['你好，世界', 'jaźń']),
+            '["你好，世界", "jaźń"]',
+        )
+        self.assertEqual(field.prepare_value({'a': '😀🐱'}), '{"a": "😀🐱"}')
+
     def test_widget(self):
         field = JSONField()
         self.assertIsInstance(field.widget, Textarea)
@@ -67,6 +78,20 @@ class JSONFieldTest(SimpleTestCase):
         field = JSONField()
         self.assertIs(field.has_changed({'a': True}, '{"a": 1}'), True)
         self.assertIs(field.has_changed({'a': 1, 'b': 2}, '{"b": 2, "a": 1}'), False)
+
+    def test_has_changed_unicode(self):
+        field = JSONField()
+        # Unicode value should be considered unchanged whether submitted as
+        # literal unicode or as ASCII-escaped representation.
+        self.assertIs(
+            field.has_changed({'name': '中国'}, '{"name": "中国"}'), False,
+        )
+        self.assertIs(
+            field.has_changed({'name': '中国'}, '{"name": "\\u4e2d\\u56fd"}'), False,
+        )
+        self.assertIs(
+            field.has_changed({'name': '中国'}, '{"name": "日本"}'), True,
+        )
 
     def test_custom_encoder_decoder(self):
         class CustomDecoder(json.JSONDecoder):

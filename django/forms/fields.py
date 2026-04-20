@@ -1258,7 +1258,7 @@ class JSONField(CharField):
     def prepare_value(self, value):
         if isinstance(value, InvalidJSONInput):
             return value
-        return json.dumps(value, cls=self.encoder)
+        return json.dumps(value, cls=self.encoder, ensure_ascii=False)
 
     def has_changed(self, initial, data):
         if super().has_changed(initial, data):

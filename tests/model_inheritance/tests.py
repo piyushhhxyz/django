@@ -175,6 +175,37 @@ class ModelInheritanceTests(TestCase):
         self.assertIs(C._meta.parents[A], C._meta.get_field('a'))
 
     @isolate_apps('model_inheritance')
+    def test_parent_link_not_confused_by_multiple_o2o_to_same_model(self):
+        """
+        Explicit parent_link=True is used even when another OneToOneField to
+        the same parent model is defined first (regression for #30285).
+        """
+        class Document(models.Model):
+            pass
+
+        # parent_link field defined first
+        class Picking1(Document):
+            document_ptr = models.OneToOneField(
+                Document, on_delete=models.CASCADE, parent_link=True, related_name='+',
+            )
+            origin = models.OneToOneField(
+                Document, related_name='picking1', on_delete=models.PROTECT,
+            )
+
+        self.assertIs(Picking1._meta.parents[Document], Picking1._meta.get_field('document_ptr'))
+
+        # non-parent_link field defined first
+        class Picking2(Document):
+            origin = models.OneToOneField(
+                Document, related_name='picking2', on_delete=models.PROTECT,
+            )
+            document_ptr = models.OneToOneField(
+                Document, on_delete=models.CASCADE, parent_link=True, related_name='+',
+            )
+
+        self.assertIs(Picking2._meta.parents[Document], Picking2._meta.get_field('document_ptr'))
+
+    @isolate_apps('model_inheritance')
     def test_init_subclass(self):
         saved_kwargs = {}
 

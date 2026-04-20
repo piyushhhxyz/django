@@ -204,7 +204,13 @@ class ModelBase(type):
             for field in base._meta.local_fields:
                 if isinstance(field, OneToOneField):
                     related = resolve_relation(new_class, field.remote_field.model)
-                    parent_links[make_model_tuple(related)] = field
+                    parent_link_key = make_model_tuple(related)
+                    # Always prefer a field with parent_link=True so that
+                    # declaration order among multiple OneToOneFields to the
+                    # same parent does not affect which one becomes the parent
+                    # link.
+                    if parent_link_key not in parent_links or field.remote_field.parent_link:
+                        parent_links[parent_link_key] = field
 
         # Track fields inherited from base models.
         inherited_attributes = set()

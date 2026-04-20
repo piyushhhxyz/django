@@ -175,6 +175,55 @@ class ModelInheritanceTests(TestCase):
         self.assertIs(C._meta.parents[A], C._meta.get_field('a'))
 
     @isolate_apps('model_inheritance')
+    def test_parent_link_selected_regardless_of_field_order(self):
+        """
+        When a child model has both an explicit parent_link=True OneToOneField
+        and another OneToOneField pointing at the same parent, the parent_link
+        field should always be selected regardless of declaration order.
+        Regression for #29998.
+        """
+        class Document(models.Model):
+            pass
+
+        class PickingPtrFirst(Document):
+            document_ptr = models.OneToOneField(
+                Document, on_delete=models.CASCADE,
+                parent_link=True, related_name='+',
+            )
+            origin = models.OneToOneField(
+                Document, related_name='picking_ptr_first',
+                on_delete=models.PROTECT,
+            )
+
+        class PickingOriginFirst(Document):
+            origin = models.OneToOneField(
+                Document, related_name='picking_origin_first',
+                on_delete=models.PROTECT,
+            )
+            document_ptr = models.OneToOneField(
+                Document, on_delete=models.CASCADE,
+                parent_link=True, related_name='+',
+            )
+
+        cases = [
+            (PickingPtrFirst, 'ptr first'),
+            (PickingOriginFirst, 'origin first'),
+        ]
+        for cls, order in cases:
+            with self.subTest(order=order):
+                self.assertIs(
+                    cls._meta.parents[Document],
+                    cls._meta.get_field('document_ptr'),
+                )
+                # System checks must not complain about parent_link for
+                # either ordering.
+                errors = cls.check()
+                self.assertFalse(
+                    any('parent_link' in str(e.msg) for e in errors),
+                    errors,
+                )
+
+    @isolate_apps('model_inheritance')
     def test_init_subclass(self):
         saved_kwargs = {}
 

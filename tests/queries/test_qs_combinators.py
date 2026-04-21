@@ -2,7 +2,7 @@ from django.db.models import Exists, F, IntegerField, OuterRef, Value
 from django.db.utils import DatabaseError, NotSupportedError
 from django.test import TestCase, skipIfDBFeature, skipUnlessDBFeature
 
-from .models import Number, ReservedName
+from .models import Celebrity, Number, ReservedName
 
 
 @skipUnlessDBFeature('supports_select_union')
@@ -153,6 +153,81 @@ class QuerySetSetOperationTests(TestCase):
         qs2 = Number.objects.filter(num=9)
         self.assertCountEqual(qs1.union(qs2).values_list('num', flat=True), [1, 9])
 
+    def test_union_with_values_list_and_order(self):
+        ReservedName.objects.bulk_create([
+            ReservedName(name='rn1', order=7),
+            ReservedName(name='rn2', order=5),
+            ReservedName(name='rn0', order=6),
+            ReservedName(name='rn9', order=-1),
+        ])
+        qs1 = ReservedName.objects.filter(order__gte=6)
+        qs2 = ReservedName.objects.filter(order__lte=5)
+        union_qs = qs1.union(qs2)
+        for ordering, values_list, expected_result in (
+            # Order by a single column.
+            (('-pk',), ('order',), [-1, 6, 5, 7]),
+            (('pk',), ('order',), [7, 5, 6, -1]),
+            # Order by multiple columns.
+            (('-name', 'pk'), ('order',), [-1, 5, 7, 6]),
+        ):
+            # order_by() applied before values_list().
+            with self.subTest(ordering=ordering, values_list=values_list, applied='before'):
+                qs = union_qs.order_by(*ordering).values_list(*values_list, flat=True)
+                self.assertEqual(list(qs), expected_result)
+            # order_by() applied after values_list().
+            with self.subTest(ordering=ordering, values_list=values_list, applied='after'):
+                qs = union_qs.values_list(*values_list, flat=True).order_by(*ordering)
+                self.assertEqual(list(qs), expected_result)
+
+    def test_union_multiple_models_with_values_list_and_order(self):
+        reserved_name = ReservedName.objects.create(name='rn1', order=0)
+        qs1 = Celebrity.objects.all()
+        qs2 = ReservedName.objects.all()
+        self.assertSequenceEqual(
+            qs1.union(qs2).order_by('name').values_list('pk', flat=True),
+            [reserved_name.pk],
+        )
+
+    def test_union_multiple_models_with_values_list_and_order_by_extra_select(self):
+        reserved_name = ReservedName.objects.create(name='rn1', order=0)
+        qs1 = Celebrity.objects.extra(select={'extra_name': 'name'})
+        qs2 = ReservedName.objects.extra(select={'extra_name': 'name'})
+        self.assertSequenceEqual(
+            qs1.union(qs2).order_by('extra_name').values_list('pk', flat=True),
+            [reserved_name.pk],
+        )
+
+    def test_union_with_values_list_and_order_nonflat(self):
+        """
+        union().order_by(col_not_in_select).values_list(col) returns correct
+        1-tuples and does not leak the extra ordering column into results.
+        Regression test for #30628.
+        """
+        ReservedName.objects.bulk_create([
+            ReservedName(name='rn1', order=7),
+            ReservedName(name='rn2', order=5),
+            ReservedName(name='rn0', order=6),
+            ReservedName(name='rn9', order=-1),
+        ])
+        qs1 = ReservedName.objects.filter(order__gte=6)
+        qs2 = ReservedName.objects.filter(order__lte=5)
+        union_qs = qs1.union(qs2)
+        for ordering, values_list, expected_result in (
+            # Order by a single column not in values_list.
+            (('-pk',), ('order',), [-1, 6, 5, 7]),
+            (('pk',), ('order',), [7, 5, 6, -1]),
+            # Order by multiple columns.
+            (('-name', 'pk'), ('order',), [-1, 5, 7, 6]),
+        ):
+            # order_by() applied before values_list().
+            with self.subTest(ordering=ordering, values_list=values_list, applied='before'):
+                qs = union_qs.order_by(*ordering).values_list(*values_list)
+                self.assertEqual(list(qs), [(v,) for v in expected_result])
+            # order_by() applied after values_list().
+            with self.subTest(ordering=ordering, values_list=values_list, applied='after'):
+                qs = union_qs.values_list(*values_list).order_by(*ordering)
+                self.assertEqual(list(qs), [(v,) for v in expected_result])
+
     def test_count_union(self):
         qs1 = Number.objects.filter(num__lte=1).values('num')
         qs2 = Number.objects.filter(num__gte=2, num__lte=3).values('num')
@@ -184,12 +259,15 @@ class QuerySetSetOperationTests(TestCase):
     def test_unsupported_ordering_slicing_raises_db_error(self):
         qs1 = Number.objects.all()
         qs2 = Number.objects.all()
+        qs3 = Number.objects.all()
         msg = 'LIMIT/OFFSET not allowed in subqueries of compound statements'
         with self.assertRaisesMessage(DatabaseError, msg):
             list(qs1.union(qs2[:10]))
         msg = 'ORDER BY not allowed in subqueries of compound statements'
         with self.assertRaisesMessage(DatabaseError, msg):
             list(qs1.order_by('id').union(qs2))
+        with self.assertRaisesMessage(DatabaseError, msg):
+            list(qs1.union(qs2).order_by('id').union(qs3))
 
     @skipIfDBFeature('supports_select_intersection')
     def test_unsupported_intersection_raises_db_error(self):

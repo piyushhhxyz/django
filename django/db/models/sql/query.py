@@ -1774,6 +1774,17 @@ class Query(BaseExpression):
         self.select = ()
         self.values_select = ()
 
+    def add_select_col(self, col, name):
+        """
+        Append ``col`` to the selected columns and ``name`` to values_select
+        as parallel tuples. Used e.g. when an ORDER BY clause on a combined
+        (union/intersection/difference) query references a column that isn't
+        already in the SELECT list and must be added so it can be referenced
+        by its positional index.
+        """
+        self.select += col,
+        self.values_select += name,
+
     def set_select(self, cols):
         self.default_cols = False
         self.select = tuple(cols)

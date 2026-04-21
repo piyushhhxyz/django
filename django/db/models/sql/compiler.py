@@ -5,7 +5,7 @@ from itertools import chain
 
 from django.core.exceptions import EmptyResultSet, FieldError
 from django.db.models.constants import LOOKUP_SEP
-from django.db.models.expressions import OrderBy, Random, RawSQL, Ref, Value
+from django.db.models.expressions import F, OrderBy, Random, RawSQL, Ref, Value
 from django.db.models.functions import Cast
 from django.db.models.query_utils import QueryWrapper, select_related_descend
 from django.db.models.sql.constants import (
@@ -50,10 +50,21 @@ class SQLCompiler:
         might not have all the pieces in place at that time.
         """
         self.setup_query()
+        select_count_before = len(self.query.select)
         order_by = self.get_order_by()
         self.where, self.having = self.query.where.split_having()
         extra_select = self.get_extra_select(order_by, self.select)
         self.has_extra_select = bool(extra_select)
+        # get_order_by() may have appended extra columns to query.select (and
+        # query.values_select) for a combined query whose ORDER BY references a
+        # column that isn't part of the user-requested SELECT list. When that
+        # happens the raw SQL result set is wider than col_count (the number of
+        # columns set before get_order_by() ran).  Setting has_extra_select
+        # causes cursor_iter() to slice each row to col_count, preventing the
+        # hidden ordering column from leaking into the results returned to the
+        # caller (e.g. values_list()).
+        if len(self.query.select) > select_count_before:
+            self.has_extra_select = True
         group_by = self.get_group_by(self.select + extra_select, order_by)
         return extra_select, order_by, group_by
 
@@ -276,6 +287,10 @@ class SQLCompiler:
         else:
             asc, desc = ORDER_DIR['DESC']
 
+        # Only apply combined-query ORDER BY handling when this is a compound
+        # query with an explicit select list (e.g. .values()/.values_list()).
+        is_combined_query = bool(self.query.combinator) and bool(self.select)
+
         order_by = []
         for field in ordering:
             if hasattr(field, 'resolve_expression'):
@@ -305,10 +320,15 @@ class SQLCompiler:
             if col in self.query.annotations:
                 # References to an expression which is masked out of the SELECT
                 # clause.
-                expr = self.query.annotations[col]
-                if isinstance(expr, Value):
-                    # output_field must be resolved for constants.
-                    expr = Cast(expr, expr.output_field)
+                if is_combined_query:
+                    # Don't use the resolved annotation because other
+                    # combined queries might define it differently.
+                    expr = F(col)
+                else:
+                    expr = self.query.annotations[col]
+                    if isinstance(expr, Value):
+                        # output_field must be resolved for constants.
+                        expr = Cast(expr, expr.output_field)
                 order_by.append((OrderBy(expr, descending=descending), False))
                 continue
 
@@ -324,10 +344,16 @@ class SQLCompiler:
                 continue
 
             if not self.query.extra or col not in self.query.extra:
-                # 'col' is of the form 'field' or 'field1__field2' or
-                # '-field1__field2__field', etc.
-                order_by.extend(self.find_ordering_name(
-                    field, self.query.get_meta(), default_order=asc))
+                if is_combined_query:
+                    # Don't use the first model's field because other
+                    # combined queries might define it differently.
+                    order_by.append((OrderBy(F(col), descending=descending), False))
+                else:
+                    # 'col' is of the form 'field' or 'field1__field2' or
+                    # '-field1__field2__field', etc.
+                    order_by.extend(self.find_ordering_name(
+                        field, self.query.get_meta(), default_order=asc,
+                    ))
             else:
                 if col not in self.query.extra_select:
                     order_by.append((
@@ -342,21 +368,43 @@ class SQLCompiler:
 
         for expr, is_ref in order_by:
             resolved = expr.resolve_expression(self.query, allow_joins=True, reuse=None)
-            if self.query.combinator:
+            if is_combined_query:
                 src = resolved.get_source_expressions()[0]
+                expr_src = expr.get_source_expressions()[0]
+                # Capture the resolved source column before the loop may mutate
+                # src (via the is_ref branch), so we have the original Col to
+                # store in query.select for idempotent re-evaluation.
+                resolved_src = src
                 # Relabel order by columns to raw numbers if this is a combined
                 # query; necessary since the columns can't be referenced by the
                 # fully qualified name and the simple column names may collide.
+                # is_combined_query guarantees self.select is non-empty, so the
+                # loop runs at least once and col_alias is bound for the `else`
+                # branch below (which relies on for-loop variable leakage).
                 for idx, (sel_expr, _, col_alias) in enumerate(self.select):
                     if is_ref and col_alias == src.refs:
                         src = src.source
-                    elif col_alias:
+                    elif col_alias and not (
+                        isinstance(expr_src, F) and col_alias == expr_src.name
+                    ):
                         continue
                     if src == sel_expr:
-                        resolved.set_source_expressions([RawSQL('%d' % (idx + 1), ())])
+                        resolved.set_source_expressions([RawSQL(f'{idx + 1}', ())])
                         break
                 else:
-                    raise DatabaseError('ORDER BY term does not match any column in the result set.')
+                    if col_alias:
+                        raise DatabaseError('ORDER BY term does not match any column in the result set.')
+                    # Add column used in ORDER BY clause to the selected
+                    # columns and to each combined query. Store the resolved
+                    # source Col (not the OrderBy wrapper) so that subsequent
+                    # evaluations of the same queryset find it via the for-loop
+                    # above and skip re-adding it (idempotency).
+                    order_by_idx = len(self.query.select) + 1
+                    col_name = f'__orderbycol{order_by_idx}'
+                    for q in self.query.combined_queries:
+                        q.add_annotation(expr_src, col_name)
+                    self.query.add_select_col(resolved_src, col_name)
+                    resolved.set_source_expressions([RawSQL(f'{order_by_idx}', ())])
             sql, params = self.compile(resolved)
             # Don't add the same column twice, but the order direction is
             # not taken into account so we strip it. When this entire method

@@ -1,4 +1,11 @@
-from django.contrib.auth import get_user, get_user_model
+from django.contrib.auth import (
+    BACKEND_SESSION_KEY,
+    HASH_SESSION_KEY,
+    SESSION_KEY,
+    get_user,
+    get_user_model,
+    login,
+)
 from django.contrib.auth.models import AnonymousUser, User
 from django.core.exceptions import ImproperlyConfigured
 from django.db import IntegrityError
@@ -138,3 +145,156 @@ class TestGetUser(TestCase):
         user = get_user(request)
         self.assertIsInstance(user, User)
         self.assertEqual(user.username, created_user.username)
+
+
+BACKEND = "django.contrib.auth.backends.ModelBackend"
+
+
+@override_settings(
+    SECRET_KEY="new-secret-key",
+    SECRET_KEY_FALLBACKS=["old-secret-key"],
+)
+class SecretKeyFallbackTests(TestCase):
+    """
+    Regression tests for #34611: SECRET_KEY_FALLBACKS must also be honored
+    when verifying session authentication hashes, so that rotating the secret
+    key doesn't log users out.
+    """
+
+    def _make_request_with_hash(self, user, session_hash, **extra_session):
+        request = HttpRequest()
+        request.session = self.client.session
+        request.session[SESSION_KEY] = str(user.pk)
+        request.session[BACKEND_SESSION_KEY] = BACKEND
+        request.session[HASH_SESSION_KEY] = session_hash
+        for key, value in extra_session.items():
+            request.session[key] = value
+        return request
+
+    def test_get_user_with_secret_key_fallback(self):
+        """
+        A session hash generated with an old SECRET_KEY (now in
+        SECRET_KEY_FALLBACKS) still authenticates the user, and the stored
+        hash is transparently upgraded to the current SECRET_KEY.
+        """
+        created_user = User.objects.create_user(
+            "fallback_user", "fallback@example.com", "testpw"
+        )
+        old_hash = created_user._get_session_auth_hash(secret="old-secret-key")
+        request = self._make_request_with_hash(created_user, old_hash)
+
+        user = get_user(request)
+
+        self.assertIsInstance(user, User)
+        self.assertEqual(user.username, created_user.username)
+        # Session hash is upgraded to the current key.
+        self.assertEqual(
+            request.session[HASH_SESSION_KEY],
+            created_user.get_session_auth_hash(),
+        )
+
+    def test_login_with_secret_key_fallback(self):
+        """
+        login() doesn't flush an existing session whose HASH_SESSION_KEY was
+        generated with an old SECRET_KEY now in SECRET_KEY_FALLBACKS; the
+        stored hash is upgraded to the current key.
+        """
+        created_user = User.objects.create_user(
+            "login_fallback_user", "login_fallback@example.com", "testpw"
+        )
+        old_hash = created_user._get_session_auth_hash(secret="old-secret-key")
+        request = self._make_request_with_hash(
+            created_user, old_hash, custom_data="should_survive"
+        )
+
+        login(request, created_user, backend=BACKEND)
+
+        # Session wasn't flushed — custom data survives.
+        self.assertEqual(request.session.get("custom_data"), "should_survive")
+        self.assertEqual(
+            request.session[HASH_SESSION_KEY],
+            created_user.get_session_auth_hash(),
+        )
+
+    def test_get_user_with_unknown_secret_key_is_logged_out(self):
+        """
+        A session hash generated with a secret not in SECRET_KEY nor
+        SECRET_KEY_FALLBACKS must be rejected: get_user() returns
+        AnonymousUser and flushes the session.
+        """
+        created_user = User.objects.create_user(
+            "unknown_key_user", "unknown_key@example.com", "testpw"
+        )
+        # Produced with a key in neither SECRET_KEY nor SECRET_KEY_FALLBACKS.
+        unknown_hash = created_user._get_session_auth_hash(
+            secret="completely-unknown-secret"
+        )
+        request = self._make_request_with_hash(created_user, unknown_hash)
+
+        user = get_user(request)
+
+        self.assertIsInstance(user, AnonymousUser)
+        self.assertNotIn(SESSION_KEY, request.session)
+
+    def test_login_with_unknown_secret_key_flushes_session(self):
+        """
+        login() flushes a session whose HASH_SESSION_KEY was generated with a
+        secret that is neither the current SECRET_KEY nor in
+        SECRET_KEY_FALLBACKS.
+        """
+        created_user = User.objects.create_user(
+            "login_unknown_key_user", "login_unknown_key@example.com", "testpw"
+        )
+        unknown_hash = created_user._get_session_auth_hash(
+            secret="completely-unknown-secret"
+        )
+        request = self._make_request_with_hash(
+            created_user, unknown_hash, custom_data="must_be_gone"
+        )
+
+        login(request, created_user, backend=BACKEND)
+
+        # The flush wiped custom_data. login() unconditionally rewrites
+        # HASH_SESSION_KEY, so that key is not a reliable flush indicator.
+        self.assertIsNone(request.session.get("custom_data"))
+
+
+class EmptySecretKeyFallbacksTests(TestCase):
+    """
+    With an empty SECRET_KEY_FALLBACKS, behavior must match the pre-fix
+    semantics: a mismatched hash causes the session to be flushed.
+    """
+
+    @override_settings(SECRET_KEY="current-secret-key", SECRET_KEY_FALLBACKS=[])
+    def test_get_user_flushes_on_mismatch_with_no_fallbacks(self):
+        created_user = User.objects.create_user(
+            "nofallback_user", "nofallback@example.com", "testpw"
+        )
+        stale_hash = created_user._get_session_auth_hash(secret="some-other-key")
+        request = HttpRequest()
+        request.session = self.client.session
+        request.session[SESSION_KEY] = str(created_user.pk)
+        request.session[BACKEND_SESSION_KEY] = BACKEND
+        request.session[HASH_SESSION_KEY] = stale_hash
+
+        user = get_user(request)
+
+        self.assertIsInstance(user, AnonymousUser)
+        self.assertNotIn(SESSION_KEY, request.session)
+
+    @override_settings(SECRET_KEY="current-secret-key", SECRET_KEY_FALLBACKS=[])
+    def test_login_flushes_on_mismatch_with_no_fallbacks(self):
+        created_user = User.objects.create_user(
+            "nofallback_login_user", "nofallback_login@example.com", "testpw"
+        )
+        stale_hash = created_user._get_session_auth_hash(secret="some-other-key")
+        request = HttpRequest()
+        request.session = self.client.session
+        request.session[SESSION_KEY] = str(created_user.pk)
+        request.session[BACKEND_SESSION_KEY] = BACKEND
+        request.session[HASH_SESSION_KEY] = stale_hash
+        request.session["custom_data"] = "must_be_gone"
+
+        login(request, created_user, backend=BACKEND)
+
+        self.assertIsNone(request.session.get("custom_data"))

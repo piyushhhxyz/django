@@ -135,10 +135,23 @@ class AbstractBaseUser(models.Model):
         """
         Return an HMAC of the password field.
         """
+        return self._get_session_auth_hash()
+
+    def _get_session_auth_hash(self, secret=None):
+        """
+        Return an HMAC of the password field using ``secret`` (defaulting to
+        :setting:`SECRET_KEY`). This is used internally to verify a session
+        hash against :setting:`SECRET_KEY_FALLBACKS` after a key rotation.
+
+        Subclasses that override :meth:`get_session_auth_hash` should also
+        override this method so that fallback-key verification produces the
+        same hash value as the public method.
+        """
         key_salt = "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash"
         return salted_hmac(
             key_salt,
             self.password,
+            secret=secret,
             algorithm="sha256",
         ).hexdigest()
 

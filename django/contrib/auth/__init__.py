@@ -21,6 +21,30 @@ def load_backend(path):
     return import_string(path)()
 
 
+def _verify_session_auth_hash(user, session_hash):
+    """
+    Return True if ``session_hash`` matches the hash derived from
+    ``settings.SECRET_KEY`` or any key in :setting:`SECRET_KEY_FALLBACKS`.
+
+    This is used to keep existing sessions valid after a key rotation.
+    Subclasses of AbstractBaseUser that override ``get_session_auth_hash()``
+    should also override ``_get_session_auth_hash(secret=None)`` so that
+    fallback verification uses the same hash value.
+    """
+    if not session_hash or not hasattr(user, "get_session_auth_hash"):
+        return False
+    if constant_time_compare(session_hash, user.get_session_auth_hash()):
+        return True
+    if hasattr(user, "_get_session_auth_hash"):
+        for fallback_secret in settings.SECRET_KEY_FALLBACKS:
+            if constant_time_compare(
+                session_hash,
+                user._get_session_auth_hash(secret=fallback_secret),
+            ):
+                return True
+    return False
+
+
 def _get_backends(return_tuples=False):
     backends = []
     for backend_path in settings.AUTHENTICATION_BACKENDS:
@@ -104,10 +128,15 @@ def login(request, user, backend=None):
         session_auth_hash = user.get_session_auth_hash()
 
     if SESSION_KEY in request.session:
+        # When the session already belongs to ``user``, keep it if the stored
+        # HASH_SESSION_KEY verifies against either the current SECRET_KEY or
+        # any SECRET_KEY_FALLBACKS entry. The unconditional assignment to
+        # HASH_SESSION_KEY below will upgrade the stored hash to the current
+        # key regardless of which key matched.
         if _get_user_session_key(request) != user.pk or (
             session_auth_hash
-            and not constant_time_compare(
-                request.session.get(HASH_SESSION_KEY, ""), session_auth_hash
+            and not _verify_session_auth_hash(
+                user, request.session.get(HASH_SESSION_KEY, "")
             )
         ):
             # To avoid reusing another user's session, create a new, empty
@@ -196,15 +225,20 @@ def get_user(request):
         if backend_path in settings.AUTHENTICATION_BACKENDS:
             backend = load_backend(backend_path)
             user = backend.get_user(user_id)
-            # Verify the session
+            # Verify the session, checking SECRET_KEY_FALLBACKS as well so
+            # that key rotation doesn't invalidate existing sessions.
             if hasattr(user, "get_session_auth_hash"):
                 session_hash = request.session.get(HASH_SESSION_KEY)
-                session_hash_verified = session_hash and constant_time_compare(
-                    session_hash, user.get_session_auth_hash()
-                )
-                if not session_hash_verified:
+                if not _verify_session_auth_hash(user, session_hash):
                     request.session.flush()
                     user = None
+                else:
+                    # If the stored hash was generated using a fallback key,
+                    # upgrade it to the current SECRET_KEY so the session
+                    # doesn't rely on the fallback on subsequent requests.
+                    current_hash = user.get_session_auth_hash()
+                    if not constant_time_compare(session_hash, current_hash):
+                        request.session[HASH_SESSION_KEY] = current_hash
 
     return user or AnonymousUser()
 

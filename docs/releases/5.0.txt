@@ -279,6 +279,13 @@ Miscellaneous
 
 * The undocumented ``django.contrib.admin.helpers.checkbox`` is removed.
 
+Bugfixes
+========
+
+* Fixed a bug in Django 4.1 where :setting:`SECRET_KEY_FALLBACKS` were not
+  used to validate session authentication hashes, causing users to be logged
+  out when rotating the secret key (:ticket:`34611`).
+
 .. _deprecated-features-5.0:
 
 Features deprecated in 5.0

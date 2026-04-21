@@ -199,8 +199,14 @@ def get_user(request):
             # Verify the session
             if hasattr(user, "get_session_auth_hash"):
                 session_hash = request.session.get(HASH_SESSION_KEY)
-                session_hash_verified = session_hash and constant_time_compare(
-                    session_hash, user.get_session_auth_hash()
+                session_hash_verified = session_hash and (
+                    constant_time_compare(session_hash, user.get_session_auth_hash())
+                    or any(
+                        constant_time_compare(
+                            session_hash, user._get_session_auth_hash(secret)
+                        )
+                        for secret in settings.SECRET_KEY_FALLBACKS
+                    )
                 )
                 if not session_hash_verified:
                     request.session.flush()

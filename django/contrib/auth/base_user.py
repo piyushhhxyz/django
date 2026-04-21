@@ -2,6 +2,7 @@
 This module allows importing AbstractBaseUser even when django.contrib.auth is
 not in INSTALLED_APPS.
 """
+
 import unicodedata
 import warnings
 
@@ -135,10 +136,18 @@ class AbstractBaseUser(models.Model):
         """
         Return an HMAC of the password field.
         """
+        return self._get_session_auth_hash()
+
+    def _get_session_auth_hash(self, secret=None):
+        # Allows get_user() to verify session hashes against SECRET_KEY_FALLBACKS.
+        # Subclasses that override get_session_auth_hash() should also override
+        # this method to keep key-rotation behaviour consistent with their
+        # custom hash inputs.
         key_salt = "django.contrib.auth.models.AbstractBaseUser.get_session_auth_hash"
         return salted_hmac(
             key_salt,
             self.password,
+            secret=secret,
             algorithm="sha256",
         ).hexdigest()
 

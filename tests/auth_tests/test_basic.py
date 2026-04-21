@@ -138,3 +138,22 @@ class TestGetUser(TestCase):
         user = get_user(request)
         self.assertIsInstance(user, User)
         self.assertEqual(user.username, created_user.username)
+
+
+class TestGetSessionAuthHash(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = User.objects.create_user(
+            "sessionhashuser", "hash@example.com", "testpw"
+        )
+
+    @override_settings(SECRET_KEY="bar")
+    def test_explicit_secret_overrides_secret_key(self):
+        """_get_session_auth_hash(secret=...) uses the given secret, not SECRET_KEY."""
+        hash_with_foo = self.user._get_session_auth_hash(secret="foo")
+        hash_with_bar = self.user._get_session_auth_hash(secret="bar")
+        default_hash = self.user.get_session_auth_hash()
+        # Hash with explicit "foo" differs from hash with current SECRET_KEY "bar".
+        self.assertNotEqual(hash_with_foo, hash_with_bar)
+        # Default (no secret) matches the current SECRET_KEY "bar".
+        self.assertEqual(default_hash, hash_with_bar)

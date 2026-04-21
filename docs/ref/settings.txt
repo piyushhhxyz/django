@@ -2302,9 +2302,11 @@ A list of fallback secret keys for a particular Django installation. These are
 used to allow rotation of the ``SECRET_KEY``.
 
 In order to rotate your secret keys, set a new ``SECRET_KEY`` and move the
-previous value to the beginning of ``SECRET_KEY_FALLBACKS``. Then remove the
-old values from the end of the ``SECRET_KEY_FALLBACKS`` when you are ready to
-expire the sessions, password reset tokens, and so on, that make use of them.
+previous value to the beginning of ``SECRET_KEY_FALLBACKS``. Sessions,
+password reset tokens, and similar items that use the old key will continue to
+work while the old key remains in ``SECRET_KEY_FALLBACKS``. Remove the old
+values from the end of the ``SECRET_KEY_FALLBACKS`` when you are ready to
+expire those sessions, password reset tokens, and so on.
 
 .. note::
 
